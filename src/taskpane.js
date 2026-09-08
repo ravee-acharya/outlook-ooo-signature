@@ -14,6 +14,7 @@
     options: 'oooOptions',
     enabled: 'oooEnabled',
     refreshed: 'oooRefreshed',
+    lastEvent: 'oooLastEvent',
     account: 'oooAccount'
   };
 
@@ -56,6 +57,21 @@
     var bits = [kept + ' day(s) in the next ' + opts.months + ' month(s)'];
     if (when) { bits.push('last refreshed ' + new Date(when).toLocaleString()); }
     $('meta').textContent = bits.join(' · ');
+
+    // The compose runtime has no console, so it records each run here.
+    // This is the only way to see why a new message came up without the block.
+    var ev = null;
+    try { ev = JSON.parse(rs.get(STORE.lastEvent) || 'null'); } catch (e) { ev = null; }
+    var el = $('lastevent');
+    if (ev && ev.at) {
+      el.textContent = 'Last new-message event: ' + ev.outcome +
+                       (ev.detail ? ' (' + ev.detail + ')' : '') +
+                       ' at ' + new Date(ev.at).toLocaleString();
+      el.className = 'muted small' + (ev.outcome === 'inserted' ? '' : ' err');
+    } else {
+      el.textContent = 'Last new-message event: none recorded yet.';
+      el.className = 'muted small';
+    }
   }
 
   function updateSigSize() {

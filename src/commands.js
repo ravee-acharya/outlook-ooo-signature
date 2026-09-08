@@ -276,14 +276,37 @@
  *
  * Dates are stored rather than rendered HTML, so days that have passed since the
  * last refresh are dropped here, offline, at the moment the mail is composed.
+ *
+ * This runtime has no visible console, so every outcome is recorded back into
+ * roaming settings under 'oooLastEvent' and surfaced by the task pane. Without
+ * that, a failure here is completely silent.
  */
 
 var STORE = {
   days: 'oooDays',
   signature: 'signatureHtml',
   options: 'oooOptions',
-  enabled: 'oooEnabled'
+  enabled: 'oooEnabled',
+  lastEvent: 'oooLastEvent'
 };
+
+// Office.onReady must be called in an event-based runtime; without it
+// Office.context can still be uninitialised when the handler is invoked.
+var officeReady = false;
+if (typeof Office !== 'undefined' && typeof Office.onReady === 'function') {
+  Office.onReady(function () { officeReady = true; });
+}
+
+function ready() {
+  return new Promise(function (resolve) {
+    if (officeReady) { resolve(); return; }
+    if (typeof Office !== 'undefined' && typeof Office.onReady === 'function') {
+      Office.onReady(function () { officeReady = true; resolve(); });
+    } else {
+      resolve();
+    }
+  });
+}
 
 function readSettings() {
   var rs = Office.context.roamingSettings;
@@ -298,20 +321,30 @@ function readSettings() {
   };
 }
 
-function buildSignatureHtml() {
-  var s = readSettings();
-  if (!s.signature && !s.enabled) { return null; }
+// Fire-and-forget: never let recording a diagnostic delay event.completed().
+function note(outcome, detail) {
+  try {
+    var rs = Office.context.roamingSettings;
+    rs.set(STORE.lastEvent, JSON.stringify({
+      at: new Date().toISOString(),
+      outcome: outcome,
+      detail: detail || ''
+    }));
+    rs.saveAsync(function () { /* ignore */ });
+  } catch (e) { /* diagnostics must never break the handler */ }
+}
 
+function buildSignatureHtml(s) {
+  if (!s.enabled && !s.signature) { return null; }
   var block = '';
   if (s.enabled) {
     try {
       block = OooCore.blockFromDays(s.days, s.options) || '';
     } catch (e) {
-      block = ''; // never let a rendering fault cost the user their signature
+      block = '';   // never let a rendering fault cost the user their signature
     }
   }
-  var html = block ? (block + s.signature) : s.signature;
-  return html || null;
+  return (block ? block + s.signature : s.signature) || null;
 }
 
 function onNewMessageComposeHandler(event) {
@@ -319,24 +352,63 @@ function onNewMessageComposeHandler(event) {
   function finish() {
     if (done) { return; }
     done = true;
-    event.completed();
+    try { event.completed(); } catch (e) { /* already completed */ }
   }
 
   // Belt and braces: if anything stalls, still release the compose window.
-  setTimeout(finish, 4000);
+  var guard = setTimeout(function () { note('timeout', 'handler exceeded 4s'); finish(); }, 4000);
 
-  try {
-    var html = buildSignatureHtml();
-    if (!html) { finish(); return; }
+  ready().then(function () {
+    try {
+      if (typeof OooCore === 'undefined') {
+        note('error', 'OooCore not loaded');
+        clearTimeout(guard); finish(); return;
+      }
+      if (!Office.context || !Office.context.roamingSettings) {
+        note('error', 'roamingSettings unavailable');
+        clearTimeout(guard); finish(); return;
+      }
 
-    Office.context.mailbox.item.body.setSignatureAsync(
-      html,
-      { coercionType: Office.CoercionType.Html },
-      function () { finish(); }
-    );
-  } catch (e) {
+      var s = readSettings();
+      var dayCount = Object.keys(s.days || {}).length;
+      var html = buildSignatureHtml(s);
+
+      if (!html) {
+        note('nothing-to-insert',
+             'days=' + dayCount + ' enabled=' + s.enabled + ' sigLen=' + s.signature.length);
+        clearTimeout(guard); finish(); return;
+      }
+
+      var item = Office.context.mailbox && Office.context.mailbox.item;
+      if (!item || !item.body || typeof item.body.setSignatureAsync !== 'function') {
+        note('error', 'setSignatureAsync unavailable');
+        clearTimeout(guard); finish(); return;
+      }
+
+      item.body.setSignatureAsync(
+        html,
+        { coercionType: Office.CoercionType.Html },
+        function (res) {
+          clearTimeout(guard);
+          if (res && res.status === Office.AsyncResultStatus.Failed) {
+            note('setSignature-failed',
+                 (res.error && res.error.message) || 'unknown');
+          } else {
+            note('inserted', 'days=' + dayCount + ' htmlLen=' + html.length);
+          }
+          finish();
+        }
+      );
+    } catch (e) {
+      note('exception', (e && e.message) ? e.message : String(e));
+      clearTimeout(guard);
+      finish();
+    }
+  }).catch(function (e) {
+    note('exception', 'ready() failed: ' + ((e && e.message) || String(e)));
+    clearTimeout(guard);
     finish();
-  }
+  });
 }
 
 // Outlook on Windows (classic) uses this association; OWA and new Outlook pick
