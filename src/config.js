@@ -15,10 +15,10 @@ var OooConfig = {
   // e.g. https://dashtech.github.io/signature-ooo
   hostUrl: 'https://ravee-acharya.github.io/outlook-ooo-signature',
 
-  // Must exactly match a redirect URI registered on the app.
-  // For the popup fallback this is the page below; for Nested App Auth
-  // the registration also needs brk-multihub://<host domain>.
-  get redirectUri() { return this.hostUrl + '/auth-end.html'; },
+  // Must exactly match a redirect URI registered on the app, character for
+  // character. auth-end.html sits in src/ alongside this file - omitting that
+  // segment yields a 404 that only surfaces mid sign-in.
+  get redirectUri() { return this.hostUrl + '/src/auth-end.html'; },
 
   // Read-only, calendar-only. User.Read is just for showing whose account is linked.
   scopes: ['User.Read', 'Calendars.Read'],
