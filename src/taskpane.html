@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=Edge">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Out of Office Signature</title>
+  <link rel="stylesheet" href="taskpane.css">
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <script src="https://alcdn.msauth.net/browser/3.20.0/js/msal-browser.min.js"></script>
+  <script src="config.js"></script>
+  <script src="ooo-core.js"></script>
+  <script src="auth.js"></script>
+  <script src="graph.js"></script>
+</head>
+<body>
+  <div id="app" hidden>
+
+    <header>
+      <h1>Out of Office Signature</h1>
+      <p id="account" class="muted">Not signed in</p>
+    </header>
+
+    <section>
+      <div class="row">
+        <button id="refresh" class="primary">Refresh from calendar</button>
+        <button id="signin">Sign in</button>
+      </div>
+      <p id="status" class="status"></p>
+    </section>
+
+    <section>
+      <h2>Preview</h2>
+      <div id="preview" class="preview"><span class="muted">Nothing loaded yet.</span></div>
+      <p id="meta" class="muted small"></p>
+    </section>
+
+    <section>
+      <h2>Settings</h2>
+      <label class="check">
+        <input type="checkbox" id="enabled" checked>
+        Add the out-of-office block to new messages
+      </label>
+
+      <div class="grid">
+        <div>
+          <label for="months">Months ahead</label>
+          <input type="number" id="months" min="1" max="12" value="3">
+        </div>
+        <div>
+          <label for="tz">Time zone label</label>
+          <input type="text" id="tz" value="IST">
+        </div>
+      </div>
+
+      <label for="heading">Heading</label>
+      <input type="text" id="heading" value="Upcoming Out of Office Days">
+
+      <label for="color">Colour</label>
+      <input type="text" id="color" value="#FF0000">
+    </section>
+
+    <section>
+      <h2>Your signature</h2>
+      <p class="muted small">
+        Paste your signature's HTML here. The block above is inserted before it on
+        every new message. Reference images by URL rather than embedding them, so
+        this stays under Outlook's roaming-settings size limit.
+      </p>
+      <textarea id="signature" rows="8" spellcheck="false"
+                placeholder="&lt;table&gt;...your signature...&lt;/table&gt;"></textarea>
+      <p id="sigsize" class="muted small"></p>
+    </section>
+
+    <section class="actions">
+      <button id="save" class="primary">Save</button>
+      <button id="signout">Sign out</button>
+    </section>
+
+  </div>
+
+  <div id="boot" class="boot">Loading&#8230;</div>
+
+  <script src="taskpane.js"></script>
+</body>
+</html>

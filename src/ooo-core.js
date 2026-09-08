@@ -1,0 +1,263 @@
+/*
+ * Shared out-of-office logic for the Outlook add-in.
+ *
+ * This is a direct port of OooCore.ps1 and must stay behaviourally identical to
+ * it - test/test-core.js runs the same fixtures as the PowerShell test suite.
+ *
+ * Loaded both in the browser (task pane + event runtime) and in Node for tests.
+ */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) { module.exports = factory(); }
+  else { root.OooCore = factory(); }
+}(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+
+  var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
+                'July', 'August', 'September', 'October', 'November', 'December'];
+
+  var DEFAULTS = {
+    heading: 'Upcoming Out of Office Days',
+    color: '#FF0000',
+    fontFamily: 'Calibri,Arial,sans-serif',
+    fontSize: '11pt',
+    timeZoneLabel: 'IST',
+    months: 3,
+    noonCutoff: 12
+  };
+
+  // Subjects/categories that mean "not at work". 'wfh' is deliberately absent:
+  // working from home still means available.
+  var KEYWORDS = ['holiday', 'leave', 'pto', 'vacation', 'out of office', 'ooo',
+                  'day off', 'comp off', 'sick', 'festival'];
+  var CATEGORY_MATCHES = ['holiday', 'out of office', 'ooo', 'leave'];
+
+  // ---------------------------------------------------------------- dates
+  function dateOnly(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+  function addDays(d, n) { var x = new Date(d.getTime()); x.setDate(x.getDate() + n); return x; }
+
+  function toISO(d) {
+    return d.getFullYear() + '-' +
+           ('0' + (d.getMonth() + 1)).slice(-2) + '-' +
+           ('0' + d.getDate()).slice(-2);
+  }
+
+  function parseISO(s) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
+  }
+
+  // Clamps to the last day of the target month, matching .NET's AddMonths
+  // (31 Aug + 3 months = 30 Nov, not 1 Dec).
+  function addMonths(d, n) {
+    var day = d.getDate();
+    var x = new Date(d.getFullYear(), d.getMonth() + n, 1);
+    var dim = new Date(x.getFullYear(), x.getMonth() + 1, 0).getDate();
+    x.setDate(Math.min(day, dim));
+    return x;
+  }
+
+  // Graph returns "2026-09-04T10:00:00.0000000" with no zone marker; combined
+  // with the Prefer: outlook.timezone header these are already wall-clock times
+  // in the requested zone, so they must be read literally rather than as UTC.
+  function parseGraphDateTime(s) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/.exec(String(s));
+    return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
+  }
+
+  // ---------------------------------------------------------------- formatting
+  function ordinal(n) {
+    if (n === 11 || n === 12 || n === 13) { return 'th'; }
+    switch (n % 10) {
+      case 1: return 'st';
+      case 2: return 'nd';
+      case 3: return 'rd';
+      default: return 'th';
+    }
+  }
+
+  function formatDay(d) {
+    return MONTHS[d.getMonth()] + ' ' + d.getDate() + '<sup>' + ordinal(d.getDate()) + '</sup>';
+  }
+
+  function formatTime(d) {
+    var h = d.getHours(), m = d.getMinutes();
+    var ap = h >= 12 ? 'PM' : 'AM';
+    var h12 = h % 12; if (h12 === 0) { h12 = 12; }
+    return m === 0 ? (h12 + ' ' + ap) : (h12 + ':' + ('0' + m).slice(-2) + ' ' + ap);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // ---------------------------------------------------------------- event -> days
+  //
+  // All-day events end at 00:00 on the day AFTER the last day off, so the end
+  // is pulled back a day.
+  //
+  // Timed events need both edges trimmed:
+  //   - ending before noon on a later day means you are back that morning, so
+  //     that day is dropped ("4 Sep 10:00 -> 7 Sep 09:00" is the 4th to 6th);
+  //   - starting at or after noon costs only part of the first day, so it gets
+  //     an "after 6 PM IST" note and later stands as its own line.
+  function getEventDays(start, end, isAllDay, opts) {
+    opts = opts || {};
+    var tzLabel = opts.timeZoneLabel || DEFAULTS.timeZoneLabel;
+    var cutoff = opts.noonCutoff == null ? DEFAULTS.noonCutoff : opts.noonCutoff;
+
+    var startDay = dateOnly(start);
+    var note = '';
+    var lastDay;
+
+    if (isAllDay) {
+      lastDay = dateOnly(end);
+      if (end.getHours() === 0 && end.getMinutes() === 0 && end.getSeconds() === 0) {
+        lastDay = addDays(lastDay, -1);
+      }
+    } else {
+      lastDay = dateOnly(end);
+      if (lastDay.getTime() > startDay.getTime() && end.getHours() < cutoff) {
+        lastDay = addDays(lastDay, -1);
+      }
+      if (start.getHours() >= cutoff) {
+        note = 'after ' + formatTime(start) + ' ' + tzLabel;
+      }
+    }
+    if (lastDay.getTime() < startDay.getTime()) { lastDay = startDay; }
+
+    var out = {};
+    for (var d = startDay; d.getTime() <= lastDay.getTime(); d = addDays(d, 1)) {
+      out[toISO(d)] = (d.getTime() === startDay.getTime()) ? note : '';
+    }
+    return out;
+  }
+
+  // Folds one event's days into the running set, clipped to the window.
+  // A full day always beats a partial-day note for the same date.
+  function mergeDays(target, newDays, from, to) {
+    Object.keys(newDays).forEach(function (k) {
+      var d = parseISO(k);
+      if (!d || d.getTime() < from.getTime() || d.getTime() > to.getTime()) { return; }
+      if (Object.prototype.hasOwnProperty.call(target, k) && target[k] === '') { return; }
+      target[k] = newDays[k];
+    });
+    return target;
+  }
+
+  function buildRuns(days) {
+    var keys = Object.keys(days).sort();
+    var runs = [], cur = null;
+    keys.forEach(function (k) {
+      var d = parseISO(k), note = days[k];
+      if (cur && cur.note === '' && note === '' &&
+          toISO(addDays(cur.end, 1)) === k) {
+        cur.end = d;
+        return;
+      }
+      if (cur) { runs.push(cur); }
+      cur = { start: d, end: d, note: note };
+    });
+    if (cur) { runs.push(cur); }
+    return runs;
+  }
+
+  function renderBlock(runs, opts) {
+    if (!runs || !runs.length) { return ''; }
+    opts = opts || {};
+    var color = opts.color || DEFAULTS.color;
+    var heading = opts.heading || DEFAULTS.heading;
+    var font = opts.fontFamily || DEFAULTS.fontFamily;
+    var size = opts.fontSize || DEFAULTS.fontSize;
+    var line = 'margin:0;padding:0;color:' + color + ';font-weight:bold;font-family:' +
+               font + ';font-size:' + size + ';';
+
+    var out = [];
+    out.push('<div style="margin:10px 0;font-family:' + font + ';font-size:' + size + ';">');
+    out.push('<p style="' + line + '"><u>' + escapeHtml(heading) + '</u></p>');
+    runs.forEach(function (r) {
+      var text = (r.start.getTime() === r.end.getTime())
+        ? formatDay(r.start)
+        : formatDay(r.start) + ' &#8211; ' + formatDay(r.end);
+      if (r.note) { text += ' ' + escapeHtml(r.note); }
+      out.push('<p style="' + line + '">' + text + '</p>');
+    });
+    out.push('</div>');
+    return out.join('\n');
+  }
+
+  // ---------------------------------------------------------------- filtering
+  function isOooEvent(ev) {
+    if (ev.isCancelled) { return false; }
+    if (ev.showAs === 'oof') { return true; }
+    var subject = String(ev.subject || '').toLowerCase();
+    var cats = (ev.categories || []).join(' ').toLowerCase();
+    var i;
+    for (i = 0; i < CATEGORY_MATCHES.length; i++) {
+      if (cats.indexOf(CATEGORY_MATCHES[i]) !== -1) { return true; }
+    }
+    for (i = 0; i < KEYWORDS.length; i++) {
+      if (subject.indexOf(KEYWORDS[i]) !== -1) { return true; }
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------- pipelines
+  // Graph events -> { 'yyyy-MM-dd': note }. Stored rather than rendered HTML so
+  // the compose-time handler can drop expired days without a network call.
+  function daysFromEvents(events, opts) {
+    opts = opts || {};
+    var today = opts.today ? dateOnly(opts.today) : dateOnly(new Date());
+    var windowEnd = addMonths(today, opts.months == null ? DEFAULTS.months : opts.months);
+    var days = {};
+
+    (events || []).forEach(function (ev) {
+      if (!isOooEvent(ev)) { return; }
+      var s = parseGraphDateTime(ev.start && ev.start.dateTime);
+      var e = parseGraphDateTime(ev.end && ev.end.dateTime);
+      if (!s || !e) { return; }
+      mergeDays(days, getEventDays(s, e, !!ev.isAllDay, opts), today, windowEnd);
+    });
+    return days;
+  }
+
+  // Re-clips a stored day map to today's window, so a signature inserted weeks
+  // after the last refresh still drops dates that have since passed.
+  function clipDays(days, opts) {
+    opts = opts || {};
+    var today = opts.today ? dateOnly(opts.today) : dateOnly(new Date());
+    var windowEnd = addMonths(today, opts.months == null ? DEFAULTS.months : opts.months);
+    var out = {};
+    Object.keys(days || {}).forEach(function (k) {
+      var d = parseISO(k);
+      if (!d || d.getTime() < today.getTime() || d.getTime() > windowEnd.getTime()) { return; }
+      out[k] = days[k];
+    });
+    return out;
+  }
+
+  function blockFromDays(days, opts) {
+    return renderBlock(buildRuns(clipDays(days, opts)), opts);
+  }
+
+  return {
+    DEFAULTS: DEFAULTS,
+    KEYWORDS: KEYWORDS,
+    dateOnly: dateOnly,
+    addDays: addDays,
+    addMonths: addMonths,
+    toISO: toISO,
+    parseISO: parseISO,
+    parseGraphDateTime: parseGraphDateTime,
+    ordinal: ordinal,
+    formatDay: formatDay,
+    formatTime: formatTime,
+    getEventDays: getEventDays,
+    mergeDays: mergeDays,
+    buildRuns: buildRuns,
+    renderBlock: renderBlock,
+    isOooEvent: isOooEvent,
+    daysFromEvents: daysFromEvents,
+    clipDays: clipDays,
+    blockFromDays: blockFromDays
+  };
+}));

@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Signing in&#8230;</title>
+  <script src="https://alcdn.msauth.net/browser/3.20.0/js/msal-browser.min.js"></script>
+  <script src="config.js"></script>
+</head>
+<body>
+  <p style="font-family:'Segoe UI',Arial,sans-serif;font-size:13px;color:#616161">
+    Completing sign-in&#8230; you can close this window if it stays open.
+  </p>
+  <script>
+    // MSAL popup redirect target. Handing the response back to the opener is all
+    // this page does; it is never shown for more than a moment.
+    (function () {
+      var pca = new msal.PublicClientApplication({
+        auth: {
+          clientId: OooConfig.clientId,
+          authority: 'https://login.microsoftonline.com/' + (OooConfig.tenantId || 'common'),
+          redirectUri: OooConfig.redirectUri
+        },
+        cache: { cacheLocation: 'localStorage' }
+      });
+      var start = pca.initialize ? pca.initialize() : Promise.resolve();
+      start.then(function () { return pca.handleRedirectPromise(); })
+           .catch(function (e) { document.body.appendChild(document.createTextNode(String(e))); });
+    }());
+  </script>
+</body>
+</html>

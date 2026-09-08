@@ -1,0 +1,91 @@
+:root {
+  --ink: #242424;
+  --muted: #616161;
+  --line: #e1e1e1;
+  --accent: #0f6cbd;
+  --bg: #ffffff;
+  --panel: #faf9f8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #f3f2f1;
+    --muted: #adadad;
+    --line: #3d3d3d;
+    --accent: #479ef5;
+    --bg: #1f1f1f;
+    --panel: #292929;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 12px;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+h1 { font-size: 15px; margin: 0 0 2px; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+     color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+
+header { margin-bottom: 14px; }
+section { border-top: 1px solid var(--line); padding: 12px 0; }
+section:first-of-type { border-top: none; padding-top: 0; }
+
+.muted { color: var(--muted); }
+.small { font-size: 11px; }
+
+label { display: block; font-size: 11px; color: var(--muted); margin: 8px 0 3px; }
+label.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); margin: 0 0 10px; }
+label.check input { margin: 0; }
+
+input[type=text], input[type=number], textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: inherit;
+  background: var(--bg);
+  color: var(--ink);
+}
+textarea { font-family: Consolas, "Courier New", monospace; font-size: 11px; resize: vertical; }
+input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+.actions { display: flex; gap: 8px; }
+
+button {
+  font: inherit;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.preview {
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+  padding: 10px;
+  background: #fff;
+  color: #242424;
+  overflow-x: auto;
+}
+
+.status { margin: 8px 0 0; font-size: 12px; min-height: 16px; }
+.status.err { color: #c4314b; }
+.status.ok  { color: #0e700e; }
+
+.boot { padding: 24px 4px; color: var(--muted); }
