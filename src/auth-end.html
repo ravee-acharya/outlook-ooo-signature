@@ -3,28 +3,101 @@
 <head>
   <meta charset="utf-8">
   <title>Signing in&#8230;</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
-  <script src="config.js?v=20260908144208"></script>
+  <script src="config.js?v=20260908181613"></script>
+  <style>
+    body { font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; color: #616161; margin: 24px; }
+    .err { color: #c4314b; white-space: pre-wrap; }
+  </style>
 </head>
 <body>
-  <p style="font-family:'Segoe UI',Arial,sans-serif;font-size:13px;color:#616161">
-    Completing sign-in&#8230; you can close this window if it stays open.
-  </p>
+  <p id="msg">Completing sign-in&#8230; you can close this window if it stays open.</p>
   <script>
-    // MSAL popup redirect target. Handing the response back to the opener is all
-    // this page does; it is never shown for more than a moment.
+    // Redirect target for the sign-in. Reached in two situations:
+    //
+    //  1. inside an Office dialog opened by the task pane - the token is handed
+    //     back with messageParent, because a task pane and an Office dialog do
+    //     not reliably share a token cache;
+    //  2. as an ordinary MSAL popup/redirect target outside Outlook, where
+    //     simply completing the promise is enough.
     (function () {
-      var pca = new msal.PublicClientApplication({
-        auth: {
-          clientId: OooConfig.clientId,
-          authority: 'https://login.microsoftonline.com/' + (OooConfig.tenantId || 'common'),
-          redirectUri: OooConfig.redirectUri
-        },
-        cache: { cacheLocation: 'localStorage' }
-      });
-      var start = pca.initialize ? pca.initialize() : Promise.resolve();
-      start.then(function () { return pca.handleRedirectPromise(); })
-           .catch(function (e) { document.body.appendChild(document.createTextNode(String(e))); });
+      var msg = document.getElementById('msg');
+
+      function report(text, isError) {
+        msg.textContent = text;
+        if (isError) { msg.className = 'err'; }
+      }
+
+      function sendToParent(payload) {
+        try {
+          if (typeof Office !== 'undefined' && Office.context &&
+              Office.context.ui && Office.context.ui.messageParent) {
+            Office.context.ui.messageParent(JSON.stringify(payload));
+            return true;
+          }
+        } catch (e) { /* not in a dialog */ }
+        return false;
+      }
+
+      function run() {
+        var pca = new msal.PublicClientApplication({
+          auth: {
+            clientId: OooConfig.clientId,
+            authority: 'https://login.microsoftonline.com/' + (OooConfig.tenantId || 'common'),
+            redirectUri: OooConfig.redirectUri
+          },
+          cache: { cacheLocation: 'localStorage' }
+        });
+
+        var ready = pca.initialize ? pca.initialize() : Promise.resolve();
+
+        ready
+          .then(function () { return pca.handleRedirectPromise(); })
+          .then(function (result) {
+            if (!result) {
+              // No response in the URL - nothing to do (e.g. opened directly).
+              report('Nothing to complete here.');
+              return;
+            }
+            if (result.account) { pca.setActiveAccount(result.account); }
+
+            // Prefer a token for the scopes we actually need.
+            return pca.acquireTokenSilent({
+              scopes: OooConfig.scopes,
+              account: result.account
+            }).catch(function () { return result; });
+          })
+          .then(function (tok) {
+            if (!tok) { return; }
+            var payload = {
+              ok: true,
+              accessToken: tok.accessToken,
+              username: (tok.account && (tok.account.username || tok.account.name)) || null
+            };
+            if (sendToParent(payload)) {
+              report('Signed in. Returning to Outlook…');
+            } else {
+              report('Signed in. You can close this window.');
+            }
+          })
+          .catch(function (e) {
+            var text = (e && e.message) ? e.message : String(e);
+            if (!sendToParent({ ok: false, error: text })) {
+              report('Sign-in failed: ' + text, true);
+            } else {
+              report('Sign-in failed: ' + text, true);
+            }
+          });
+      }
+
+      // Office.js may never initialise outside Outlook, so do not wait on it.
+      if (typeof Office !== 'undefined' && Office.onReady) {
+        Office.onReady(run);
+        setTimeout(function () { if (!msg.dataset.done) { /* onReady may not fire */ } }, 0);
+      } else {
+        run();
+      }
     }());
   </script>
 </body>

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Signing in&#8230;</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
+  <script src="config.js?v=20260908181613"></script>
+  <style>
+    body { font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; color: #242424; margin: 24px; }
+    .err { color: #c4314b; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <p id="msg">Redirecting you to sign in&#8230;</p>
+  <script>
+    // Entry point for the Office Dialog API. Task panes cannot reliably open a
+    // browser popup - Outlook blocks it - so the sign-in runs inside an
+    // Office-managed dialog instead, which cannot be blocked.
+    //
+    // This page only kicks off the redirect. Entra sends the response to
+    // auth-end.html, which hands the token back to the task pane.
+    (function () {
+      function fail(e) {
+        var m = document.getElementById('msg');
+        m.className = 'err';
+        m.textContent = 'Sign-in could not start: ' + (e && e.message ? e.message : String(e));
+      }
+      try {
+        var pca = new msal.PublicClientApplication({
+          auth: {
+            clientId: OooConfig.clientId,
+            authority: 'https://login.microsoftonline.com/' + (OooConfig.tenantId || 'common'),
+            redirectUri: OooConfig.redirectUri
+          },
+          cache: { cacheLocation: 'localStorage' }
+        });
+        var ready = pca.initialize ? pca.initialize() : Promise.resolve();
+        ready
+          .then(function () {
+            return pca.acquireTokenRedirect({
+              scopes: OooConfig.scopes,
+              redirectUri: OooConfig.redirectUri,
+              prompt: 'select_account'
+            });
+          })
+          .catch(fail);
+      } catch (e) { fail(e); }
+    }());
+  </script>
+</body>
+</html>

@@ -16,6 +16,21 @@ var OooAuth = (function () {
   var app = null;
   var usingNaa = false;
 
+  // A token obtained through the Office dialog arrives as a bare string and is
+  // not in this window's MSAL cache, so hold it here for the life of the pane.
+  // Expiry is not tracked precisely - it is only used to avoid re-prompting for
+  // every action in one sitting, and a stale one simply falls back to signing in.
+  var dialogToken = null;
+  var dialogTokenAt = 0;
+  var dialogAccount = null;
+  var DIALOG_TOKEN_TTL_MS = 45 * 60 * 1000;
+
+  function cachedDialogToken() {
+    if (!dialogToken) { return null; }
+    if (Date.now() - dialogTokenAt > DIALOG_TOKEN_TTL_MS) { dialogToken = null; return null; }
+    return dialogToken;
+  }
+
   function msalConfig() {
     return {
       auth: {
@@ -59,6 +74,9 @@ var OooAuth = (function () {
    * @returns {Promise<string|null>} access token, or null when silent-only and not signed in
    */
   async function getToken(interactive) {
+    var cached = cachedDialogToken();
+    if (cached) { return cached; }
+
     var a = await getApp();
     var account = pickAccount(a);
 
@@ -72,18 +90,86 @@ var OooAuth = (function () {
     }
     if (!interactive) { return null; }
 
+    // Inside Outlook, go through the Office Dialog API rather than a popup.
+    // Task panes routinely block window.open, which surfaces as MSAL's
+    // popup_window_error; an Office-managed dialog cannot be blocked.
+    if (isInOutlook()) {
+      var viaDialog = await getTokenViaDialog();
+      if (viaDialog) {
+        dialogToken = viaDialog.accessToken;
+        dialogTokenAt = Date.now();
+        dialogAccount = viaDialog.username || null;
+        return dialogToken;
+      }
+    }
+
     var res = await a.acquireTokenPopup({ scopes: OooConfig.scopes });
     if (res.account) { a.setActiveAccount(res.account); }
     return res.accessToken;
   }
 
+  function isInOutlook() {
+    try {
+      return typeof Office !== 'undefined' && Office.context && Office.context.ui &&
+             typeof Office.context.ui.displayDialogAsync === 'function' &&
+             !!Office.context.mailbox;
+    } catch (e) { return false; }
+  }
+
+  // Opens auth-dialog.html in an Office dialog; that page redirects through
+  // Entra and auth-end.html posts the token back with messageParent.
+  function getTokenViaDialog() {
+    return new Promise(function (resolve) {
+      var url = OooConfig.hostUrl + '/src/auth-dialog.html';
+      var dialog = null;
+      var settled = false;
+
+      function finish(payload) {
+        if (settled) { return; }
+        settled = true;
+        try { if (dialog) { dialog.close(); } } catch (e) { /* already gone */ }
+        resolve(payload || null);
+      }
+
+      Office.context.ui.displayDialogAsync(
+        url,
+        { height: 60, width: 30, promptBeforeOpen: false },
+        function (result) {
+          if (result.status !== Office.AsyncResultStatus.Succeeded) {
+            finish(null);   // fall back to the popup path
+            return;
+          }
+          dialog = result.value;
+
+          dialog.addEventHandler(Office.EventType.DialogMessageReceived, function (arg) {
+            var payload = null;
+            try { payload = JSON.parse(arg.message); } catch (e) { payload = null; }
+            finish(payload && payload.ok ? payload : null);
+          });
+
+          // Covers the user closing the dialog themselves.
+          dialog.addEventHandler(Office.EventType.DialogEventReceived, function () {
+            finish(null);
+          });
+        }
+      );
+    });
+  }
+
   async function getSignedInAccount() {
+    if (dialogAccount) { return dialogAccount; }
     var a = await getApp();
     var acct = pickAccount(a);
     return acct ? (acct.username || acct.name || null) : null;
   }
 
   async function signOut() {
+    // Clear the dialog-held token too, otherwise signing out would appear to do
+    // nothing for the rest of the session.
+    dialogToken = null;
+    dialogTokenAt = 0;
+    dialogAccount = null;
+
     var a = await getApp();
     var acct = pickAccount(a);
     if (acct && typeof a.clearCache === 'function') {
