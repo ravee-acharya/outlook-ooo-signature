@@ -63,6 +63,10 @@
     var ev = null;
     try { ev = JSON.parse(rs.get(STORE.lastEvent) || 'null'); } catch (e) { ev = null; }
     var el = $('lastevent');
+    // Guard: during a redeploy Outlook can serve cached HTML that predates this
+    // element. Throwing here would abort restore() and leave the pane blank -
+    // a diagnostic must never be able to break the UI it reports into.
+    if (!el) { return; }
     if (ev && ev.at) {
       el.textContent = 'Last new-message event: ' + ev.outcome +
                        (ev.detail ? ' (' + ev.detail + ')' : '') +
@@ -235,8 +239,9 @@
     $('app').hidden = false;
     if (!isOutlook) { showBrowserBanner(); }
 
-    wire();
-    restore();
+    // Never let a rendering fault leave the user staring at an empty pane.
+    try { wire(); } catch (e) { setStatus('UI error: ' + (e.message || e), 'err'); }
+    try { restore(); } catch (e) { setStatus('Could not load saved settings: ' + (e.message || e), 'err'); }
 
     if (String(OooConfig.clientId).indexOf('__') === 0) {
       setStatus('Not configured yet: config.js still has placeholder values.', 'err');
