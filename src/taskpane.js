@@ -74,8 +74,13 @@
     rs.set(STORE.signature, $('signature').value);
     rs.set(STORE.enabled, $('enabled').checked);
     rs.saveAsync(function (res) {
-      if (res.status === Office.AsyncResultStatus.Succeeded) { cb(null); }
-      else { cb(new Error((res.error && res.error.message) || 'Could not save settings.')); }
+      // Compare loosely: the local shim reports a plain 'succeeded' string and
+      // Office.AsyncResultStatus is unavailable when running outside Outlook.
+      var ok = res && (res.status === 'succeeded' ||
+                       (typeof Office !== 'undefined' && Office.AsyncResultStatus &&
+                        res.status === Office.AsyncResultStatus.Succeeded));
+      if (ok) { cb(null); }
+      else { cb(new Error((res && res.error && res.error.message) || 'Could not save settings.')); }
     });
   }
 
@@ -169,12 +174,50 @@
     renderPreview();
   }
 
-  Office.onReady(function (info) {
-    if (info.host !== Office.HostType.Outlook) { return; }
-    rs = Office.context.roamingSettings;
+  // Opened directly in a browser rather than inside Outlook there is no mailbox,
+  // so roaming settings do not exist. Rather than sit on "Loading..." forever,
+  // fall back to a localStorage-backed stand-in. Sign-in, the calendar read and
+  // the preview can then all be exercised outside Outlook, which is the only way
+  // to test the Graph side before the add-in is deployed.
+  function makeLocalShim() {
+    var KEY = 'oooLocalSettings';
+    var bag = {};
+    try { bag = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { bag = {}; }
+    return {
+      get: function (k) { return Object.prototype.hasOwnProperty.call(bag, k) ? bag[k] : undefined; },
+      set: function (k, v) { bag[k] = v; },
+      remove: function (k) { delete bag[k]; },
+      saveAsync: function (cb) {
+        try {
+          localStorage.setItem(KEY, JSON.stringify(bag));
+          cb({ status: 'succeeded' });
+        } catch (e) {
+          cb({ status: 'failed', error: { message: e.message } });
+        }
+      }
+    };
+  }
+
+  function showBrowserBanner() {
+    var b = document.createElement('p');
+    b.className = 'status err';
+    b.style.margin = '0 0 10px';
+    b.textContent = 'Running outside Outlook — signing in and the calendar preview work, ' +
+                    'but settings are saved to this browser only, not to your mailbox.';
+    $('app').insertBefore(b, $('app').firstChild);
+  }
+
+  var started = false;
+
+  function boot(isOutlook) {
+    if (started) { return; }
+    started = true;
+
+    rs = isOutlook ? Office.context.roamingSettings : makeLocalShim();
 
     $('boot').hidden = true;
     $('app').hidden = false;
+    if (!isOutlook) { showBrowserBanner(); }
 
     wire();
     restore();
@@ -186,5 +229,13 @@
 
     // Quietly top up if we already have a usable token; never prompt on open.
     refreshFromCalendar(false).catch(function () { /* stay silent on load */ });
+  }
+
+  Office.onReady(function (info) {
+    boot(!!(info && info.host === Office.HostType.Outlook));
   });
+
+  // Office.js can fail to resolve at all when the page is loaded outside an
+  // Office host; without this the pane would hang on "Loading..." indefinitely.
+  setTimeout(function () { boot(false); }, 4000);
 }());
