@@ -6,8 +6,12 @@
   <title>Signature OOO runtime</title>
   <!-- Headless host page for the event-based runtime. Never shown to the user. -->
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <!-- Needed only for the optional silent token used by the compose-time refresh.
+       Where this page is not loaded, or the CDN is unreachable, the refresh is
+       skipped and the stored dates are used instead. -->
+  <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
   <!-- Same bundle the web runtime uses, so both paths run identical code. -->
-  <script src="commands.js?v=20260908185331"></script>
+  <script src="commands.js?v=20260916162802"></script>
 </head>
 <body>
 </body>

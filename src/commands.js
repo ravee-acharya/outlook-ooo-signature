@@ -2,6 +2,43 @@
    ooo-core.js is inlined here because Outlook on the web loads only this file
    for event-based activation and never loads commands.html. */
 /*
+ * Fill these in AFTER IT completes the Entra app registration and tells you
+ * where the add-in will be hosted. Everything else in the add-in reads from here.
+ *
+ * manifest.xml contains the same placeholders - keep the two in step.
+ */
+var OooConfig = {
+  // Application (client) ID from the Entra app registration.
+  clientId: '5173e29d-0a45-45bd-a734-474006421d42',
+
+  // Directory (tenant) ID. 'common' works but pinning the tenant is tighter.
+  tenantId: '17f2fc0e-75aa-464d-9428-9811d5baa84e',
+
+  // HTTPS origin the add-in is served from, no trailing slash,
+  // e.g. https://dashtech.github.io/signature-ooo
+  hostUrl: 'https://ravee-acharya.github.io/outlook-ooo-signature',
+
+  // Must exactly match a redirect URI registered on the app, character for
+  // character. auth-end.html sits in src/ alongside this file - omitting that
+  // segment yields a 404 that only surfaces mid sign-in.
+  get redirectUri() { return this.hostUrl + '/src/auth-end.html'; },
+
+  // Read-only, calendar-only. User.Read is just for showing whose account is linked.
+  scopes: ['User.Read', 'Calendars.Read'],
+
+  // Defaults for a new user; changeable in the task pane.
+  defaults: {
+    months: 3,
+    timeZoneLabel: 'IST',
+    timeZoneId: 'India Standard Time',
+    heading: 'Upcoming Out of Office Days',
+    color: '#FF0000'
+  }
+};
+
+if (typeof module === 'object' && module.exports) { module.exports = OooConfig; }
+
+/*
  * Shared out-of-office logic for the Outlook add-in.
  *
  * This is a direct port of OooCore.ps1 and must stay behaviourally identical to
@@ -266,13 +303,83 @@
 }));
 
 /*
+ * Microsoft Graph calls. Read-only: calendarView and /me, nothing else.
+ */
+var OooGraph = (function () {
+  'use strict';
+
+  var BASE = 'https://graph.microsoft.com/v1.0';
+
+  function pad(n) { return ('0' + n).slice(-2); }
+
+  // Local wall-clock, no zone suffix - paired with the Prefer header below so
+  // Graph interprets and returns everything in the user's own time zone.
+  function graphLocal(d) {
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+           'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+
+  async function call(url, token, timeZoneId) {
+    var headers = { Authorization: 'Bearer ' + token };
+    if (timeZoneId) { headers.Prefer = 'outlook.timezone="' + timeZoneId + '"'; }
+
+    var res = await fetch(url, { headers: headers });
+    if (!res.ok) {
+      var detail = '';
+      try {
+        var body = await res.json();
+        detail = (body.error && body.error.message) ? ': ' + body.error.message : '';
+      } catch (e) { /* non-JSON error body */ }
+      throw new Error('Graph ' + res.status + detail);
+    }
+    return res.json();
+  }
+
+  async function getMe(token) {
+    var me = await call(BASE + '/me?$select=displayName,userPrincipalName,mail', token, null);
+    var addr = me.mail || me.userPrincipalName;
+    return { name: me.displayName || '', address: addr || '', label: me.displayName ? (me.displayName + ' <' + addr + '>') : addr };
+  }
+
+  /**
+   * Events overlapping the window. Starts 90 days early so multi-day leave that
+   * began before today is still caught and clipped, matching the desktop tool.
+   */
+  async function getCalendarEvents(token, from, to, timeZoneId) {
+    var url = BASE + '/me/calendarView' +
+      '?startDateTime=' + encodeURIComponent(graphLocal(OooCore.addDays(from, -90))) +
+      '&endDateTime=' + encodeURIComponent(graphLocal(OooCore.addDays(to, 1))) +
+      '&$select=subject,start,end,isAllDay,showAs,categories,isCancelled' +
+      '&$top=200';
+
+    var events = [];
+    var guard = 0;
+    while (url && guard++ < 50) {
+      var page = await call(url, token, timeZoneId);
+      events = events.concat(page.value || []);
+      url = page['@odata.nextLink'];
+    }
+    return events;
+  }
+
+  return { getMe: getMe, getCalendarEvents: getCalendarEvents };
+}());
+
+/*
  * Event-based runtime: runs on every new message compose and writes the
  * signature, with the out-of-office block on top.
  *
- * Hard rule for this file: NO network calls and NO sign-in prompts. Outlook
- * gives a compose handler only a few seconds before it kills the runtime, and a
- * blocked handler means the user gets no signature at all. Everything needed is
- * read from roaming settings, which the task pane refreshes.
+ * Hard rule for this file: NEVER prompt for sign-in, and never let anything
+ * block indefinitely. Outlook gives a compose handler only a few seconds before
+ * it kills the runtime, and a blocked handler means the user gets no signature
+ * at all.
+ *
+ * It does attempt one time-boxed calendar refresh so newly added or removed
+ * out-of-office dates appear without the user opening the task pane. That
+ * refresh is strictly optional: it uses a silently cached token only, is capped
+ * by REFRESH_BUDGET_MS, and on any failure or timeout the handler falls straight
+ * back to the dates already in roaming settings. Worst case is identical to
+ * having no refresh at all.
  *
  * Dates are stored rather than rendered HTML, so days that have passed since the
  * last refresh are dropped here, offline, at the moment the mail is composed.
@@ -287,8 +394,78 @@ var STORE = {
   signature: 'signatureHtml',
   options: 'oooOptions',
   enabled: 'oooEnabled',
+  refreshed: 'oooRefreshed',
   lastEvent: 'oooLastEvent'
 };
+
+// How long the optional calendar refresh may take before we give up and use the
+// stored dates. Outlook's compose budget is a few seconds and the signature
+// matters more than its freshness, so this stays well under the 4s guard below.
+var REFRESH_BUDGET_MS = 2500;
+
+function withTimeout(promise, ms, fallback) {
+  return new Promise(function (resolve) {
+    var settled = false;
+    var timer = setTimeout(function () {
+      if (!settled) { settled = true; resolve(fallback); }
+    }, ms);
+    promise.then(function (v) {
+      if (!settled) { settled = true; clearTimeout(timer); resolve(v); }
+    }, function () {
+      if (!settled) { settled = true; clearTimeout(timer); resolve(fallback); }
+    });
+  });
+}
+
+// Silent only - never interactive. The task pane and this runtime are the same
+// origin, so MSAL's cached account is visible here. If MSAL is absent (the
+// JavaScript-only runtime on classic Windows) or nothing is cached, we simply
+// skip the refresh.
+function getSilentToken() {
+  return new Promise(function (resolve) {
+    if (typeof msal === 'undefined' || typeof OooConfig === 'undefined') { resolve(null); return; }
+    try {
+      var pca = new msal.PublicClientApplication({
+        auth: {
+          clientId: OooConfig.clientId,
+          authority: 'https://login.microsoftonline.com/' + (OooConfig.tenantId || 'common'),
+          redirectUri: OooConfig.redirectUri
+        },
+        cache: { cacheLocation: 'localStorage' }
+      });
+      var ready = pca.initialize ? pca.initialize() : Promise.resolve();
+      ready.then(function () {
+        var acct = pca.getActiveAccount() || (pca.getAllAccounts() || [])[0];
+        if (!acct) { return null; }
+        return pca.acquireTokenSilent({ scopes: OooConfig.scopes, account: acct });
+      }).then(function (r) {
+        resolve(r && r.accessToken ? r.accessToken : null);
+      }).catch(function () { resolve(null); });
+    } catch (e) { resolve(null); }
+  });
+}
+
+// Returns a fresh day map, or null if anything at all gets in the way.
+function refreshDays(options) {
+  if (typeof OooGraph === 'undefined' || typeof OooCore === 'undefined') {
+    return Promise.resolve(null);
+  }
+  var months = options.months || 3;
+  return getSilentToken().then(function (token) {
+    if (!token) { return null; }
+    var today = OooCore.dateOnly(new Date());
+    var windowEnd = OooCore.addMonths(today, months);
+    var tz = (typeof OooConfig !== 'undefined' && OooConfig.defaults && OooConfig.defaults.timeZoneId)
+      ? OooConfig.defaults.timeZoneId : 'India Standard Time';
+    return OooGraph.getCalendarEvents(token, today, windowEnd, tz).then(function (events) {
+      return OooCore.daysFromEvents(events, {
+        today: today,
+        months: months,
+        timeZoneLabel: options.timeZoneLabel || 'IST'
+      });
+    });
+  }).catch(function () { return null; });
+}
 
 // Office.onReady must be called in an event-based runtime; without it
 // Office.context can still be uninitialised when the handler is invoked.
@@ -370,35 +547,54 @@ function onNewMessageComposeHandler(event) {
       }
 
       var s = readSettings();
-      var dayCount = Object.keys(s.days || {}).length;
-      var html = buildSignatureHtml(s);
 
-      if (!html) {
-        note('nothing-to-insert',
-             'days=' + dayCount + ' enabled=' + s.enabled + ' sigLen=' + s.signature.length);
-        clearTimeout(guard); finish(); return;
-      }
-
-      var item = Office.context.mailbox && Office.context.mailbox.item;
-      if (!item || !item.body || typeof item.body.setSignatureAsync !== 'function') {
-        note('error', 'setSignatureAsync unavailable');
-        clearTimeout(guard); finish(); return;
-      }
-
-      item.body.setSignatureAsync(
-        html,
-        { coercionType: Office.CoercionType.Html },
-        function (res) {
-          clearTimeout(guard);
-          if (res && res.status === Office.AsyncResultStatus.Failed) {
-            note('setSignature-failed',
-                 (res.error && res.error.message) || 'unknown');
-          } else {
-            note('inserted', 'days=' + dayCount + ' htmlLen=' + html.length);
-          }
-          finish();
+      // Optional, time-boxed. Null means "use what we already have".
+      withTimeout(refreshDays(s.options), REFRESH_BUDGET_MS, null).then(function (freshDays) {
+        var refreshed = false;
+        if (freshDays) {
+          s.days = freshDays;
+          refreshed = true;
+          try {
+            var rs = Office.context.roamingSettings;
+            rs.set(STORE.days, JSON.stringify(freshDays));
+            rs.set(STORE.refreshed, new Date().toISOString());
+            rs.saveAsync(function () { /* best effort - must not gate the signature */ });
+          } catch (e) { /* ignore */ }
         }
-      );
+
+        var dayCount = Object.keys(s.days || {}).length;
+        var html = buildSignatureHtml(s);
+
+        if (!html) {
+          note('nothing-to-insert',
+               'days=' + dayCount + ' enabled=' + s.enabled + ' sigLen=' + s.signature.length +
+               ' refreshed=' + refreshed);
+          clearTimeout(guard); finish(); return;
+        }
+
+        var item = Office.context.mailbox && Office.context.mailbox.item;
+        if (!item || !item.body || typeof item.body.setSignatureAsync !== 'function') {
+          note('error', 'setSignatureAsync unavailable');
+          clearTimeout(guard); finish(); return;
+        }
+
+        item.body.setSignatureAsync(
+          html,
+          { coercionType: Office.CoercionType.Html },
+          function (res) {
+            clearTimeout(guard);
+            if (res && res.status === Office.AsyncResultStatus.Failed) {
+              note('setSignature-failed',
+                   (res.error && res.error.message) || 'unknown');
+            } else {
+              note('inserted',
+                   'days=' + dayCount + ' htmlLen=' + html.length +
+                   ' refreshed=' + refreshed);
+            }
+            finish();
+          }
+        );
+      });
     } catch (e) {
       note('exception', (e && e.message) ? e.message : String(e));
       clearTimeout(guard);
