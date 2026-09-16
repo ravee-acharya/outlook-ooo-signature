@@ -541,7 +541,9 @@ var STORE = {
   enabled: 'oooEnabled',
   refreshed: 'oooRefreshed',
   lastEvent: 'oooLastEvent',
-  useShared: 'oooUseShared'
+  useShared: 'oooUseShared',
+  activated: 'oooActivated',
+  account: 'oooAccount'
 };
 
 // How long the optional calendar refresh may take before we give up and use the
@@ -631,6 +633,23 @@ function ready() {
   });
 }
 
+// Whether this mailbox has ever completed a sign-in in the task pane.
+//
+// This gates the entire handler. The company holiday list is a public static
+// file needing no authentication, so without this check a user who never signed
+// in would still get holidays injected - and because their own signature is
+// unset, setSignatureAsync would REPLACE their normal Outlook signature with a
+// bare holiday block.
+//
+// The explicit flag is authoritative; the older signals are honoured so people
+// already using the add-in are not forced to sign in again.
+function isActivated(rs) {
+  var flag = rs.get(STORE.activated);
+  if (flag === true) { return true; }
+  if (flag === false) { return false; }
+  return !!(rs.get(STORE.refreshed) || rs.get(STORE.account));
+}
+
 function readSettings() {
   var rs = Office.context.roamingSettings;
   var days = {}, options = {};
@@ -705,6 +724,13 @@ function onNewMessageComposeHandler(event) {
       }
       if (!Office.context || !Office.context.roamingSettings) {
         note('error', 'roamingSettings unavailable');
+        clearTimeout(guard); finish(); return;
+      }
+
+      if (!isActivated(Office.context.roamingSettings)) {
+        // Not signed in: touch nothing at all, so Outlook's own signature
+        // behaviour is left exactly as it was.
+        note('not-activated', 'user has not signed in to the add-in');
         clearTimeout(guard); finish(); return;
       }
 

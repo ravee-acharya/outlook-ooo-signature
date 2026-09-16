@@ -16,6 +16,7 @@
     refreshed: 'oooRefreshed',
     lastEvent: 'oooLastEvent',
     useShared: 'oooUseShared',
+    activated: 'oooActivated',
     account: 'oooAccount'
   };
 
@@ -40,6 +41,15 @@
     };
   }
 
+  // Mirrors isActivated() in the compose runtime. Until the user has signed in
+  // once, the add-in must not contribute anything to their signature.
+  function isActivated() {
+    var flag = rs.get(STORE.activated);
+    if (flag === true) { return true; }
+    if (flag === false) { return false; }
+    return !!(rs.get(STORE.refreshed) || rs.get(STORE.account));
+  }
+
   function loadDays() {
     try { return JSON.parse(rs.get(STORE.days) || '{}'); } catch (e) { return {}; }
   }
@@ -47,6 +57,9 @@
   // Personal leave plus the centrally published company holidays.
   function combinedDays(opts) {
     var days = loadDays();
+    // Company holidays are published publicly, so they would otherwise render
+    // for someone who has never signed in.
+    if (!isActivated()) { return {}; }
     if (!$('useshared').checked) { return days; }
     try {
       var cache = OooShared.readCache(rs);
@@ -75,8 +88,9 @@
     var html = '';
     try { html = OooCore.blockFromDays(days, opts); } catch (e) { html = ''; }
 
-    $('preview').innerHTML = html ||
-      '<span class="muted">No upcoming days off &#8212; nothing will be added.</span>';
+    $('preview').innerHTML = html || (isActivated()
+      ? '<span class="muted">No upcoming days off &#8212; nothing will be added.</span>'
+      : '<span class="muted">Sign in to load your calendar. Until then nothing is added to your signature.</span>');
 
     renderSharedInfo();
     var kept = Object.keys(OooCore.clipDays(days, opts)).length;
@@ -163,6 +177,7 @@
 
     rs.set(STORE.days, JSON.stringify(days));
     rs.set(STORE.refreshed, new Date().toISOString());
+    rs.set(STORE.activated, true);
     if (me) { rs.set(STORE.account, me.label); }
 
     await new Promise(function (resolve, reject) {
@@ -199,8 +214,16 @@
 
     $('signout').addEventListener('click', function () {
       OooAuth.signOut().then(function () {
-        $('account').textContent = 'Not signed in';
-        setStatus('Signed out. Your stored dates are unchanged.', null);
+        // Deactivate as well, otherwise the compose handler would carry on
+        // inserting the block for someone who has signed out.
+        rs.set(STORE.activated, false);
+        rs.set(STORE.refreshed, '');
+        rs.set(STORE.account, '');
+        rs.saveAsync(function () {
+          $('account').textContent = 'Not signed in';
+          renderPreview();
+          setStatus('Signed out. Nothing will be added to your signature.', null);
+        });
       });
     });
 
