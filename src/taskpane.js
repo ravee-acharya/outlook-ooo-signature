@@ -308,6 +308,14 @@
       return;
     }
 
+    // An explicit sign-out must stick. Without this the silent refresh below
+    // could re-acquire a token and re-activate on the next open, making Sign out
+    // appear to do nothing.
+    if (rs.get(STORE.activated) === false) {
+      setStatus('Signed out. Sign in to start adding the block again.', null);
+      return;
+    }
+
     // Quietly top up if we already have a usable token; never prompt on open.
     refreshFromCalendar(false).catch(function () { /* stay silent on load */ });
   }

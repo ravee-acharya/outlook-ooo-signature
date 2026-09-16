@@ -170,12 +170,37 @@ var OooAuth = (function () {
     dialogTokenAt = 0;
     dialogAccount = null;
 
-    var a = await getApp();
-    var acct = pickAccount(a);
-    if (acct && typeof a.clearCache === 'function') {
-      await a.clearCache({ account: acct });
-    }
+    try {
+      var a = await getApp();
+      var acct = pickAccount(a);
+      if (acct) {
+        if (typeof a.clearCache === 'function') { await a.clearCache({ account: acct }); }
+        else if (typeof a.removeAccount === 'function') { await a.removeAccount(acct); }
+      } else if (typeof a.clearCache === 'function') {
+        await a.clearCache();
+      }
+    } catch (e) { /* fall through to the explicit purge below */ }
+
+    // A token acquired through the Office dialog may never have reached this
+    // window's MSAL cache, so the calls above can find no account and clear
+    // nothing. Whatever MSAL left behind is removed explicitly here - otherwise
+    // the next silent refresh quietly signs the user back in and Sign out looks
+    // like it did nothing.
+    try {
+      var doomed = [];
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (!k) { continue; }
+        if (k.indexOf('msal') === 0 || k.indexOf('msal.') !== -1 ||
+            (OooConfig && OooConfig.clientId && k.indexOf(OooConfig.clientId) !== -1)) {
+          doomed.push(k);
+        }
+      }
+      doomed.forEach(function (k) { try { localStorage.removeItem(k); } catch (e) { } });
+    } catch (e) { /* private mode or storage blocked - nothing more we can do */ }
+
     app = null;
+    usingNaa = false;
   }
 
   return {
