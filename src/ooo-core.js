@@ -132,14 +132,35 @@
     return out;
   }
 
+  // A day's value is either a plain string (a partial-day note, e.g.
+  // "after 6 PM IST") or an object { note, label }. The label carries a public
+  // holiday's name so the recipient can tell a company holiday from personal
+  // leave. Strings are kept for the common case so nothing about the previous
+  // stored format or output changes.
+  function normDay(v) {
+    if (v == null) { return { note: '', label: '' }; }
+    if (typeof v === 'string') { return { note: v, label: '' }; }
+    return { note: v.note || '', label: v.label || '' };
+  }
+
+  // Merges two entries for the same date. A whole day always beats a
+  // partial-day note, and a holiday name survives either way - a day that is
+  // both personal leave and a public holiday should still name the holiday.
+  function combineEntry(a, b) {
+    var A = normDay(a), B = normDay(b);
+    var note = (A.note === '' || B.note === '') ? '' : A.note;
+    var label = A.label || B.label;
+    return label ? { note: note, label: label } : note;
+  }
+
   // Folds one event's days into the running set, clipped to the window.
-  // A full day always beats a partial-day note for the same date.
   function mergeDays(target, newDays, from, to) {
     Object.keys(newDays).forEach(function (k) {
       var d = parseISO(k);
       if (!d || d.getTime() < from.getTime() || d.getTime() > to.getTime()) { return; }
-      if (Object.prototype.hasOwnProperty.call(target, k) && target[k] === '') { return; }
-      target[k] = newDays[k];
+      target[k] = Object.prototype.hasOwnProperty.call(target, k)
+        ? combineEntry(target[k], newDays[k])
+        : newDays[k];
     });
     return target;
   }
@@ -148,14 +169,17 @@
     var keys = Object.keys(days).sort();
     var runs = [], cur = null;
     keys.forEach(function (k) {
-      var d = parseISO(k), note = days[k];
-      if (cur && cur.note === '' && note === '' &&
+      var d = parseISO(k), e = normDay(days[k]);
+      // Consecutive whole days merge only when they carry the same label, so a
+      // two-day holiday stays one line but a holiday never absorbs the day
+      // beside it.
+      if (cur && cur.note === '' && e.note === '' && cur.label === e.label &&
           toISO(addDays(cur.end, 1)) === k) {
         cur.end = d;
         return;
       }
       if (cur) { runs.push(cur); }
-      cur = { start: d, end: d, note: note };
+      cur = { start: d, end: d, note: e.note, label: e.label };
     });
     if (cur) { runs.push(cur); }
     return runs;
@@ -179,6 +203,7 @@
         ? formatDay(r.start)
         : formatDay(r.start) + ' &#8211; ' + formatDay(r.end);
       if (r.note) { text += ' ' + escapeHtml(r.note); }
+      if (r.label) { text += ' (' + escapeHtml(r.label) + ')'; }
       out.push('<p style="' + line + '">' + text + '</p>');
     });
     out.push('</div>');
@@ -253,9 +278,13 @@
       if (e.getTime() < s.getTime()) { var t = s; s = e; e = t; }
 
       var note = String(h.note || '').trim();
+      var label = String(h.name || '').trim();
       var out = {};
       for (var d = s; d.getTime() <= e.getTime(); d = addDays(d, 1)) {
-        out[toISO(d)] = (d.getTime() === s.getTime()) ? note : '';
+        // The label goes on every day of the range so the whole range merges
+        // into a single line; the note applies to the first day only.
+        var dayNote = (d.getTime() === s.getTime()) ? note : '';
+        out[toISO(d)] = label ? { note: dayNote, label: label } : dayNote;
       }
       mergeDays(days, out, today, windowEnd);
     });
@@ -269,8 +298,9 @@
     var out = {};
     Object.keys(a || {}).forEach(function (k) { out[k] = a[k]; });
     Object.keys(b || {}).forEach(function (k) {
-      if (!Object.prototype.hasOwnProperty.call(out, k)) { out[k] = b[k]; return; }
-      if (out[k] !== '' && b[k] === '') { out[k] = ''; }
+      out[k] = Object.prototype.hasOwnProperty.call(out, k)
+        ? combineEntry(out[k], b[k])
+        : b[k];
     });
     return out;
   }
@@ -298,6 +328,7 @@
     isOooEvent: isOooEvent,
     daysFromEvents: daysFromEvents,
     clipDays: clipDays,
+    normDay: normDay,
     daysFromHolidays: daysFromHolidays,
     unionDays: unionDays,
     blockFromDays: blockFromDays
