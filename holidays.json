@@ -3,8 +3,9 @@
   "updated": "2026-09-16",
   "source": "Keka holiday list",
   "holidays": [
-    { "start": "2026-10-20", "end": "2026-10-21", "name": "Diwali" },
-    { "start": "2026-11-05", "name": "Guru Nanak Jayanti" },
-    { "start": "2026-12-25", "name": "Christmas" }
+    { "start": "2026-10-02", "name": "Mahatma Gandhi Jayanti" },
+    { "start": "2026-10-20", "name": "Dusshera" },
+    { "start": "2026-11-08", "end": "2026-11-10", "name": "Diwali & New Year" },
+    { "start": "2026-12-25", "name": "Christmas"}
   ]
 }
