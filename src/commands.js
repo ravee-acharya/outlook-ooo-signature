@@ -275,6 +275,46 @@ if (typeof module === 'object' && module.exports) { module.exports = OooConfig; 
     return out;
   }
 
+  // Company-wide holidays published centrally alongside the add-in, so one
+  // person can maintain them for everybody. Same shape as the CSV the desktop
+  // tool uses: start, optional end (inclusive), optional note.
+  function daysFromHolidays(list, opts) {
+    opts = opts || {};
+    var today = opts.today ? dateOnly(opts.today) : dateOnly(new Date());
+    var windowEnd = addMonths(today, opts.months == null ? DEFAULTS.months : opts.months);
+    var days = {};
+
+    (list || []).forEach(function (h) {
+      if (!h || !h.start) { return; }
+      var s = parseISO(h.start);
+      if (!s) { return; }
+      var e = h.end ? parseISO(h.end) : s;
+      if (!e) { e = s; }
+      if (e.getTime() < s.getTime()) { var t = s; s = e; e = t; }
+
+      var note = String(h.note || '').trim();
+      var out = {};
+      for (var d = s; d.getTime() <= e.getTime(); d = addDays(d, 1)) {
+        out[toISO(d)] = (d.getTime() === s.getTime()) ? note : '';
+      }
+      mergeDays(days, out, today, windowEnd);
+    });
+    return days;
+  }
+
+  // Combines personal leave with company holidays. Both are already clipped to
+  // the window, so no re-clipping here. A whole day always beats a partial-day
+  // note for the same date, whichever side it came from.
+  function unionDays(a, b) {
+    var out = {};
+    Object.keys(a || {}).forEach(function (k) { out[k] = a[k]; });
+    Object.keys(b || {}).forEach(function (k) {
+      if (!Object.prototype.hasOwnProperty.call(out, k)) { out[k] = b[k]; return; }
+      if (out[k] !== '' && b[k] === '') { out[k] = ''; }
+    });
+    return out;
+  }
+
   function blockFromDays(days, opts) {
     return renderBlock(buildRuns(clipDays(days, opts)), opts);
   }
@@ -298,6 +338,8 @@ if (typeof module === 'object' && module.exports) { module.exports = OooConfig; 
     isOooEvent: isOooEvent,
     daysFromEvents: daysFromEvents,
     clipDays: clipDays,
+    daysFromHolidays: daysFromHolidays,
+    unionDays: unionDays,
     blockFromDays: blockFromDays
   };
 }));
@@ -366,6 +408,78 @@ var OooGraph = (function () {
 }());
 
 /*
+ * Company-wide holidays, published once and applied to everyone.
+ *
+ * The list lives at <host>/holidays.json, which the app owner edits directly on
+ * GitHub. It is fetched same-origin, so no CORS and no credentials are involved,
+ * and it holds nothing sensitive - just dates.
+ *
+ * Every consumer caches the parsed result in roaming settings, so the list keeps
+ * working offline and inside the compose handler's tight time budget.
+ */
+var OooShared = (function () {
+  'use strict';
+
+  var CACHE_KEY = 'oooSharedHolidays';
+  var CACHE_AT_KEY = 'oooSharedHolidaysAt';
+
+  function url() {
+    var base = (typeof OooConfig !== 'undefined' && OooConfig.hostUrl) ? OooConfig.hostUrl : '';
+    // Bucketed by the hour: fresh enough for a list that changes a few times a
+    // year, without defeating caching on every single compose.
+    var bucket = Math.floor(Date.now() / 3600000);
+    return base + '/holidays.json?h=' + bucket;
+  }
+
+  /**
+   * @returns {Promise<{holidays:Array, updated:string}|null>} null on any failure
+   */
+  function fetchList() {
+    if (typeof fetch !== 'function') { return Promise.resolve(null); }
+    return fetch(url())
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        if (!j || !Object.prototype.hasOwnProperty.call(j, 'holidays')) { return null; }
+        if (!(j.holidays instanceof Array)) { return null; }
+        return { holidays: j.holidays, updated: j.updated || '' };
+      })
+      .catch(function () { return null; });
+  }
+
+  function readCache(rs) {
+    try {
+      var raw = rs.get(CACHE_KEY);
+      if (!raw) { return null; }
+      var parsed = JSON.parse(raw);
+      return (parsed && parsed.holidays instanceof Array) ? parsed : null;
+    } catch (e) { return null; }
+  }
+
+  function writeCache(rs, list) {
+    try {
+      rs.set(CACHE_KEY, JSON.stringify(list));
+      rs.set(CACHE_AT_KEY, new Date().toISOString());
+      return true;
+    } catch (e) { return false; }
+  }
+
+  // Turns whichever list we have into a day map for the current window.
+  function toDays(list, opts) {
+    if (!list || !(list.holidays instanceof Array)) { return {}; }
+    return OooCore.daysFromHolidays(list.holidays, opts);
+  }
+
+  return {
+    CACHE_KEY: CACHE_KEY,
+    CACHE_AT_KEY: CACHE_AT_KEY,
+    fetchList: fetchList,
+    readCache: readCache,
+    writeCache: writeCache,
+    toDays: toDays
+  };
+}());
+
+/*
  * Event-based runtime: runs on every new message compose and writes the
  * signature, with the out-of-office block on top.
  *
@@ -395,7 +509,8 @@ var STORE = {
   options: 'oooOptions',
   enabled: 'oooEnabled',
   refreshed: 'oooRefreshed',
-  lastEvent: 'oooLastEvent'
+  lastEvent: 'oooLastEvent',
+  useShared: 'oooUseShared'
 };
 
 // How long the optional calendar refresh may take before we give up and use the
@@ -494,8 +609,24 @@ function readSettings() {
     days: days,
     options: options,
     signature: rs.get(STORE.signature) || '',
-    enabled: rs.get(STORE.enabled) !== false
+    enabled: rs.get(STORE.enabled) !== false,
+    // Company holidays are on unless the user has explicitly opted out.
+    useShared: rs.get(STORE.useShared) !== false,
+    sharedCache: (typeof OooShared !== 'undefined') ? OooShared.readCache(rs) : null
   };
+}
+
+// Personal leave plus company holidays, honouring the user's opt-out.
+function combinedDays(s) {
+  if (!s.useShared || typeof OooShared === 'undefined' || !s.sharedCache) {
+    return s.days;
+  }
+  try {
+    var sharedDays = OooShared.toDays(s.sharedCache, s.options);
+    return OooCore.unionDays(s.days, sharedDays);
+  } catch (e) {
+    return s.days;   // a bad shared list must never cost the user their own dates
+  }
 }
 
 // Fire-and-forget: never let recording a diagnostic delay event.completed().
@@ -516,7 +647,7 @@ function buildSignatureHtml(s) {
   var block = '';
   if (s.enabled) {
     try {
-      block = OooCore.blockFromDays(s.days, s.options) || '';
+      block = OooCore.blockFromDays(combinedDays(s), s.options) || '';
     } catch (e) {
       block = '';   // never let a rendering fault cost the user their signature
     }
@@ -549,7 +680,20 @@ function onNewMessageComposeHandler(event) {
       var s = readSettings();
 
       // Optional, time-boxed. Null means "use what we already have".
-      withTimeout(refreshDays(s.options), REFRESH_BUDGET_MS, null).then(function (freshDays) {
+      var work = Promise.all([
+        refreshDays(s.options),
+        (typeof OooShared !== 'undefined') ? OooShared.fetchList() : Promise.resolve(null)
+      ]);
+
+      withTimeout(work, REFRESH_BUDGET_MS, [null, null]).then(function (both) {
+        var freshDays = both && both[0];
+        var freshShared = both && both[1];
+
+        if (freshShared && typeof OooShared !== 'undefined') {
+          s.sharedCache = freshShared;
+          try { OooShared.writeCache(Office.context.roamingSettings, freshShared); } catch (e) { }
+        }
+
         var refreshed = false;
         if (freshDays) {
           s.days = freshDays;
@@ -562,7 +706,7 @@ function onNewMessageComposeHandler(event) {
           } catch (e) { /* ignore */ }
         }
 
-        var dayCount = Object.keys(s.days || {}).length;
+        var dayCount = Object.keys(combinedDays(s) || {}).length;
         var html = buildSignatureHtml(s);
 
         if (!html) {

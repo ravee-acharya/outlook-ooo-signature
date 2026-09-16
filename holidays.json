@@ -1,0 +1,10 @@
+{
+  "_comment": "Company-wide public holidays, applied to everyone using the add-in. Edit this file directly on GitHub - it is never overwritten by a rebuild, and GitHub Pages republishes within about a minute. 'end' is inclusive and optional; 'note' is optional and appears after the date.",
+  "updated": "2026-09-16",
+  "source": "Keka holiday list",
+  "holidays": [
+    { "start": "2026-10-20", "end": "2026-10-21", "name": "Diwali" },
+    { "start": "2026-11-05", "name": "Guru Nanak Jayanti" },
+    { "start": "2026-12-25", "name": "Christmas" }
+  ]
+}

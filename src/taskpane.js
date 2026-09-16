@@ -15,6 +15,7 @@
     enabled: 'oooEnabled',
     refreshed: 'oooRefreshed',
     lastEvent: 'oooLastEvent',
+    useShared: 'oooUseShared',
     account: 'oooAccount'
   };
 
@@ -43,15 +44,41 @@
     try { return JSON.parse(rs.get(STORE.days) || '{}'); } catch (e) { return {}; }
   }
 
-  function renderPreview() {
+  // Personal leave plus the centrally published company holidays.
+  function combinedDays(opts) {
     var days = loadDays();
+    if (!$('useshared').checked) { return days; }
+    try {
+      var cache = OooShared.readCache(rs);
+      if (!cache) { return days; }
+      return OooCore.unionDays(days, OooShared.toDays(cache, opts));
+    } catch (e) { return days; }
+  }
+
+  function renderSharedInfo() {
+    var el = $('sharedinfo');
+    if (!el) { return; }
+    var cache = null;
+    try { cache = OooShared.readCache(rs); } catch (e) { cache = null; }
+    if (!cache) {
+      el.textContent = 'Company holiday list not loaded yet.';
+      return;
+    }
+    var n = (cache.holidays || []).length;
+    el.textContent = n + ' company holiday(s) published' +
+                     (cache.updated ? ', list dated ' + cache.updated : '') + '.';
+  }
+
+  function renderPreview() {
     var opts = currentOptions();
+    var days = combinedDays(opts);
     var html = '';
     try { html = OooCore.blockFromDays(days, opts); } catch (e) { html = ''; }
 
     $('preview').innerHTML = html ||
       '<span class="muted">No upcoming days off &#8212; nothing will be added.</span>';
 
+    renderSharedInfo();
     var kept = Object.keys(OooCore.clipDays(days, opts)).length;
     var when = rs.get(STORE.refreshed);
     var bits = [kept + ' day(s) in the next ' + opts.months + ' month(s)'];
@@ -93,6 +120,7 @@
     rs.set(STORE.options, JSON.stringify(currentOptions()));
     rs.set(STORE.signature, $('signature').value);
     rs.set(STORE.enabled, $('enabled').checked);
+    rs.set(STORE.useShared, $('useshared').checked);
     rs.saveAsync(function (res) {
       // Compare loosely: the local shim reports a plain 'succeeded' string and
       // Office.AsyncResultStatus is unavailable when running outside Outlook.
@@ -126,6 +154,12 @@
 
     var me = null;
     try { me = await OooGraph.getMe(token); } catch (e) { /* non-fatal */ }
+
+    // Central holiday list - a static same-origin file, so no auth and no CORS.
+    try {
+      var shared = await OooShared.fetchList();
+      if (shared) { OooShared.writeCache(rs, shared); }
+    } catch (e) { /* keep whatever is cached */ }
 
     rs.set(STORE.days, JSON.stringify(days));
     rs.set(STORE.refreshed, new Date().toISOString());
@@ -174,6 +208,8 @@
       $(id).addEventListener('input', renderPreview);
     });
     $('signature').addEventListener('input', updateSigSize);
+    $('useshared').addEventListener('change', renderPreview);
+    $('enabled').addEventListener('change', renderPreview);
   }
 
   function restore() {
@@ -186,6 +222,7 @@
     $('color').value = opts.color || OooConfig.defaults.color;
     $('signature').value = rs.get(STORE.signature) || '';
     $('enabled').checked = rs.get(STORE.enabled) !== false;
+    $('useshared').checked = rs.get(STORE.useShared) !== false;
 
     var acct = rs.get(STORE.account);
     if (acct) { $('account').textContent = 'Linked account: ' + acct; }

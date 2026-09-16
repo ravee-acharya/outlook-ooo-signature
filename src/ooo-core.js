@@ -235,6 +235,46 @@
     return out;
   }
 
+  // Company-wide holidays published centrally alongside the add-in, so one
+  // person can maintain them for everybody. Same shape as the CSV the desktop
+  // tool uses: start, optional end (inclusive), optional note.
+  function daysFromHolidays(list, opts) {
+    opts = opts || {};
+    var today = opts.today ? dateOnly(opts.today) : dateOnly(new Date());
+    var windowEnd = addMonths(today, opts.months == null ? DEFAULTS.months : opts.months);
+    var days = {};
+
+    (list || []).forEach(function (h) {
+      if (!h || !h.start) { return; }
+      var s = parseISO(h.start);
+      if (!s) { return; }
+      var e = h.end ? parseISO(h.end) : s;
+      if (!e) { e = s; }
+      if (e.getTime() < s.getTime()) { var t = s; s = e; e = t; }
+
+      var note = String(h.note || '').trim();
+      var out = {};
+      for (var d = s; d.getTime() <= e.getTime(); d = addDays(d, 1)) {
+        out[toISO(d)] = (d.getTime() === s.getTime()) ? note : '';
+      }
+      mergeDays(days, out, today, windowEnd);
+    });
+    return days;
+  }
+
+  // Combines personal leave with company holidays. Both are already clipped to
+  // the window, so no re-clipping here. A whole day always beats a partial-day
+  // note for the same date, whichever side it came from.
+  function unionDays(a, b) {
+    var out = {};
+    Object.keys(a || {}).forEach(function (k) { out[k] = a[k]; });
+    Object.keys(b || {}).forEach(function (k) {
+      if (!Object.prototype.hasOwnProperty.call(out, k)) { out[k] = b[k]; return; }
+      if (out[k] !== '' && b[k] === '') { out[k] = ''; }
+    });
+    return out;
+  }
+
   function blockFromDays(days, opts) {
     return renderBlock(buildRuns(clipDays(days, opts)), opts);
   }
@@ -258,6 +298,8 @@
     isOooEvent: isOooEvent,
     daysFromEvents: daysFromEvents,
     clipDays: clipDays,
+    daysFromHolidays: daysFromHolidays,
+    unionDays: unionDays,
     blockFromDays: blockFromDays
   };
 }));
