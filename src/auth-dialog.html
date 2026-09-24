@@ -5,7 +5,7 @@
   <title>Signing in&#8230;</title>
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
-  <script src="config.js?v=20260924124143"></script>
+  <script src="config.js?v=20260924125617"></script>
   <style>
     body { font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; color: #242424; margin: 24px; }
     .err { color: #c4314b; white-space: pre-wrap; }
@@ -59,7 +59,12 @@
           auth: {
             clientId: OooConfig.clientId,
             authority: 'https://login.microsoftonline.com/' + (OooConfig.tenantId || 'common'),
-            redirectUri: OooConfig.redirectUri
+            redirectUri: OooConfig.redirectUri,
+            // MUST be false. The default (true) makes MSAL navigate back to the
+            // page that started the redirect once the response is handled. That
+            // page is this one, which immediately starts another redirect -
+            // an infinite sign-in loop that never completes.
+            navigateToLoginRequestUrl: false
           },
           cache: { cacheLocation: 'localStorage' }
         });

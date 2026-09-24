@@ -5,7 +5,7 @@
   <title>Signing in&#8230;</title>
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
-  <script src="config.js?v=20260924124143"></script>
+  <script src="config.js?v=20260924125617"></script>
   <style>
     body { font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; color: #616161; margin: 24px; }
     .err { color: #c4314b; white-space: pre-wrap; }
@@ -61,7 +61,11 @@
           auth: {
             clientId: OooConfig.clientId,
             authority: 'https://login.microsoftonline.com/' + (OooConfig.tenantId || 'common'),
-            redirectUri: OooConfig.redirectUri
+            redirectUri: OooConfig.redirectUri,
+            // See auth-dialog.html: leaving this true sends MSAL back to the
+            // dialog page after handling the response, which starts the whole
+            // redirect again and loops indefinitely.
+            navigateToLoginRequestUrl: false
           },
           cache: { cacheLocation: 'localStorage' }
         });
@@ -72,8 +76,13 @@
           .then(function () { return pca.handleRedirectPromise(); })
           .then(function (result) {
             if (!result) {
-              // No response in the URL - nothing to do (e.g. opened directly).
-              report('Nothing to complete here.');
+              // No response in the URL. Tell the parent rather than sitting
+              // here silently - otherwise the dialog stays open forever and the
+              // task pane waits on a reply that never comes.
+              clearLocks();
+              if (!sendToParent({ ok: false, error: 'no sign-in response received' })) {
+                report('Nothing to complete here.');
+              }
               return;
             }
             if (result.account) { pca.setActiveAccount(result.account); }

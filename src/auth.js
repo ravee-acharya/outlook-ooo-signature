@@ -63,7 +63,8 @@ var OooAuth = (function () {
       auth: {
         clientId: OooConfig.clientId,
         authority: 'https://login.microsoftonline.com/' + (OooConfig.tenantId || 'common'),
-        redirectUri: OooConfig.redirectUri
+        redirectUri: OooConfig.redirectUri,
+        navigateToLoginRequestUrl: false
       },
       cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false },
       system: { loggerOptions: { loggerCallback: function () {} } }
