@@ -5,7 +5,7 @@
   <title>Signing in&#8230;</title>
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
-  <script src="config.js?v=20260916194732"></script>
+  <script src="config.js?v=20260924124143"></script>
   <style>
     body { font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; color: #242424; margin: 24px; }
     .err { color: #c4314b; white-space: pre-wrap; }
@@ -21,11 +21,39 @@
     // This page only kicks off the redirect. Entra sends the response to
     // auth-end.html, which hands the token back to the task pane.
     (function () {
+      // MSAL leaves an interaction.status lock behind if a flow is abandoned,
+      // and every later sign-in then fails with interaction_in_progress. There
+      // is no API to clear it, so remove it directly.
+      function clearLocks() {
+        [localStorage, sessionStorage].forEach(function (store) {
+          try {
+            var doomed = [];
+            for (var i = 0; i < store.length; i++) {
+              var k = store.key(i);
+              if (k && k.indexOf('interaction.status') !== -1) { doomed.push(k); }
+            }
+            doomed.forEach(function (k) { try { store.removeItem(k); } catch (e) { } });
+          } catch (e) { }
+        });
+      }
+
       function fail(e) {
+        clearLocks();
         var m = document.getElementById('msg');
         m.className = 'err';
         m.textContent = 'Sign-in could not start: ' + (e && e.message ? e.message : String(e));
+        try {
+          if (Office && Office.context && Office.context.ui) {
+            Office.context.ui.messageParent(JSON.stringify({
+              ok: false, error: (e && e.message) ? e.message : String(e) }));
+          }
+        } catch (e2) { /* not in a dialog */ }
       }
+
+      // A lock from a previous abandoned attempt would fail this one before it
+      // even starts.
+      clearLocks();
+
       try {
         var pca = new msal.PublicClientApplication({
           auth: {

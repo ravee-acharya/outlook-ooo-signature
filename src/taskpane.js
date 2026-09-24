@@ -17,6 +17,7 @@
     lastEvent: 'oooLastEvent',
     useShared: 'oooUseShared',
     activated: 'oooActivated',
+    region: 'oooRegion',
     account: 'oooAccount'
   };
 
@@ -25,6 +26,27 @@
 
   var $ = function (id) { return document.getElementById(id); };
   var rs = null;
+
+  // MSAL error codes are meaningless to the person reading them. Translate the
+  // ones users actually hit into something they can act on.
+  function friendlyError(e) {
+    var raw = (e && e.message) ? e.message : String(e);
+    if (/interaction_in_progress/i.test(raw)) {
+      return 'A previous sign-in was left unfinished. It has been cleared - ' +
+             'please click Sign in again.';
+    }
+    if (/popup_window_error|popup_blocked/i.test(raw)) {
+      return 'Outlook blocked the sign-in window. Click Sign in again, or open ' +
+             'the add-in in Outlook on the web.';
+    }
+    if (/user_cancelled|sign-in window was closed/i.test(raw)) {
+      return 'Sign-in was cancelled.';
+    }
+    if (/AADSTS50011|redirect/i.test(raw)) {
+      return 'Sign-in configuration problem (redirect URI). Please report this: ' + raw;
+    }
+    return raw;
+  }
 
   function setStatus(msg, kind) {
     var el = $('status');
@@ -64,8 +86,45 @@
     try {
       var cache = OooShared.readCache(rs);
       if (!cache) { return days; }
-      return OooCore.unionDays(days, OooShared.toDays(cache, opts));
+      return OooCore.unionDays(days, OooShared.toDays(cache, opts, $('region').value));
     } catch (e) { return days; }
+  }
+
+  // Rebuilds the region list, preserving the current choice where it still
+  // exists. Called after every refresh because the published file can gain or
+  // lose a region at any time.
+  function renderRegions() {
+    var sel = $('region');
+    if (!sel) { return; }
+
+    var cache = null;
+    try { cache = OooShared.readCache(rs); } catch (e) { cache = null; }
+    var regions = OooShared.regionsOf(cache);
+
+    var wanted = sel.value || rs.get(STORE.region) || '';
+    sel.innerHTML = '';
+
+    if (!regions.length) {
+      var opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No holiday lists published';
+      sel.appendChild(opt);
+      sel.disabled = true;
+      return;
+    }
+
+    regions.forEach(function (r) {
+      var o = document.createElement('option');
+      o.value = r.key;
+      o.textContent = r.label + ' (' + r.holidays.length + ')';
+      sel.appendChild(o);
+    });
+
+    // Fall back the same way the runtime does, so the pane and the compose
+    // handler never disagree about which region is in force.
+    var effective = OooShared.pickRegion(cache, wanted);
+    sel.value = effective ? effective.key : regions[0].key;
+    sel.disabled = !$('useshared').checked;
   }
 
   function renderSharedInfo() {
@@ -77,8 +136,10 @@
       el.textContent = 'Company holiday list not loaded yet.';
       return;
     }
-    var n = (cache.holidays || []).length;
-    el.textContent = n + ' company holiday(s) published' +
+    var region = OooShared.pickRegion(cache, $('region') ? $('region').value : '');
+    var n = region ? region.holidays.length : 0;
+    el.textContent = n + ' holiday(s) published for ' +
+                     (region ? region.label : 'this region') +
                      (cache.updated ? ', list dated ' + cache.updated : '') + '.';
   }
 
@@ -92,6 +153,7 @@
       ? '<span class="muted">No upcoming days off &#8212; nothing will be added.</span>'
       : '<span class="muted">Sign in to load your calendar. Until then nothing is added to your signature.</span>');
 
+    renderRegions();
     renderSharedInfo();
     var kept = Object.keys(OooCore.clipDays(days, opts)).length;
     var when = rs.get(STORE.refreshed);
@@ -135,6 +197,7 @@
     rs.set(STORE.signature, $('signature').value);
     rs.set(STORE.enabled, $('enabled').checked);
     rs.set(STORE.useShared, $('useshared').checked);
+    rs.set(STORE.region, $('region').value || '');
     rs.saveAsync(function (res) {
       // Compare loosely: the local shim reports a plain 'succeeded' string and
       // Office.AsyncResultStatus is unavailable when running outside Outlook.
@@ -194,14 +257,23 @@
     $('refresh').addEventListener('click', function () {
       $('refresh').disabled = true;
       refreshFromCalendar(true)
-        .catch(function (e) { setStatus(e.message || String(e), 'err'); })
+        .catch(function (e) {
+          OooAuth.clearInteractionLocks();
+          setStatus(friendlyError(e), 'err');
+        })
         .then(function () { $('refresh').disabled = false; });
     });
 
     $('signin').addEventListener('click', function () {
-      refreshFromCalendar(true).catch(function (e) {
-        setStatus(e.message || String(e), 'err');
-      });
+      $('signin').disabled = true;
+      refreshFromCalendar(true)
+        .catch(function (e) {
+          // Clear on failure so the very next click is not blocked by the lock
+          // this attempt may have left behind.
+          OooAuth.clearInteractionLocks();
+          setStatus(friendlyError(e), 'err');
+        })
+        .then(function () { $('signin').disabled = false; });
     });
 
     $('save').addEventListener('click', function () {
@@ -231,7 +303,11 @@
       $(id).addEventListener('input', renderPreview);
     });
     $('signature').addEventListener('input', updateSigSize);
-    $('useshared').addEventListener('change', renderPreview);
+    $('useshared').addEventListener('change', function () {
+      $('region').disabled = !$('useshared').checked;
+      renderPreview();
+    });
+    $('region').addEventListener('change', renderPreview);
     $('enabled').addEventListener('change', renderPreview);
   }
 
@@ -246,6 +322,8 @@
     $('signature').value = rs.get(STORE.signature) || '';
     $('enabled').checked = rs.get(STORE.enabled) !== false;
     $('useshared').checked = rs.get(STORE.useShared) !== false;
+    renderRegions();
+    $('region').value = rs.get(STORE.region) || $('region').value;
 
     var acct = rs.get(STORE.account);
     if (acct) { $('account').textContent = 'Linked account: ' + acct; }

@@ -31,6 +31,33 @@ var OooAuth = (function () {
     return dialogToken;
   }
 
+  // MSAL records an "interaction.status" lock in storage as soon as an
+  // interactive flow starts, and clears it when that flow finishes. Closing the
+  // sign-in dialog, or a redirect that never lands, leaves the lock behind - and
+  // from then on EVERY sign-in fails with interaction_in_progress until it is
+  // removed. There is no supported API to clear it, so remove it directly.
+  function clearInteractionLocks() {
+    var removed = 0;
+    [typeof localStorage !== 'undefined' ? localStorage : null,
+     typeof sessionStorage !== 'undefined' ? sessionStorage : null].forEach(function (store) {
+      if (!store) { return; }
+      try {
+        var doomed = [];
+        for (var i = 0; i < store.length; i++) {
+          var k = store.key(i);
+          if (k && k.indexOf('interaction.status') !== -1) { doomed.push(k); }
+        }
+        doomed.forEach(function (k) { try { store.removeItem(k); removed++; } catch (e) { } });
+      } catch (e) { /* storage blocked */ }
+    });
+    return removed;
+  }
+
+  // A second sign-in started while the first is still running is itself a cause
+  // of interaction_in_progress - two clicks on Sign in is enough. Share the one
+  // in-flight attempt instead of starting another.
+  var signInInFlight = null;
+
   function msalConfig() {
     return {
       auth: {
@@ -90,22 +117,45 @@ var OooAuth = (function () {
     }
     if (!interactive) { return null; }
 
+    if (signInInFlight) { return signInInFlight; }
+    signInInFlight = doInteractiveSignIn(a)
+      .then(function (t) { signInInFlight = null; return t; },
+            function (e) { signInInFlight = null; throw e; });
+    return signInInFlight;
+  }
+
+  async function doInteractiveSignIn(a) {
+    // Always start from a clean slate: a lock left over from an abandoned
+    // attempt would otherwise fail this one too.
+    clearInteractionLocks();
+
     // Inside Outlook, go through the Office Dialog API rather than a popup.
-    // Task panes routinely block window.open, which surfaces as MSAL's
-    // popup_window_error; an Office-managed dialog cannot be blocked.
+    // Task panes block window.open, which surfaces as popup_window_error.
     if (isInOutlook()) {
       var viaDialog = await getTokenViaDialog();
-      if (viaDialog) {
+      if (viaDialog && viaDialog.accessToken) {
         dialogToken = viaDialog.accessToken;
         dialogTokenAt = Date.now();
         dialogAccount = viaDialog.username || null;
         return dialogToken;
       }
+      // Do NOT fall back to a popup here. Outlook blocks it, so the user would
+      // get popup_window_error on top of whatever actually went wrong, with no
+      // idea what to do. Report the real problem instead.
+      clearInteractionLocks();
+      var why = (viaDialog && viaDialog.error) ? (' (' + viaDialog.error + ')') : '';
+      throw new Error('Sign-in did not complete' + why +
+                      '. Close any sign-in window that is still open and try again.');
     }
 
-    var res = await a.acquireTokenPopup({ scopes: OooConfig.scopes });
-    if (res.account) { a.setActiveAccount(res.account); }
-    return res.accessToken;
+    try {
+      var res = await a.acquireTokenPopup({ scopes: OooConfig.scopes });
+      if (res.account) { a.setActiveAccount(res.account); }
+      return res.accessToken;
+    } catch (e) {
+      clearInteractionLocks();
+      throw e;
+    }
   }
 
   function isInOutlook() {
@@ -144,12 +194,17 @@ var OooAuth = (function () {
           dialog.addEventHandler(Office.EventType.DialogMessageReceived, function (arg) {
             var payload = null;
             try { payload = JSON.parse(arg.message); } catch (e) { payload = null; }
-            finish(payload && payload.ok ? payload : null);
+            // Pass failures through rather than collapsing them to null, so the
+            // caller can tell the user what actually went wrong.
+            finish(payload || { ok: false, error: 'no response from sign-in' });
           });
 
-          // Covers the user closing the dialog themselves.
-          dialog.addEventHandler(Office.EventType.DialogEventReceived, function () {
-            finish(null);
+          // The user closed the dialog, or the host dismissed it. MSAL's lock is
+          // still set in that case, so clear it before anyone tries again.
+          dialog.addEventHandler(Office.EventType.DialogEventReceived, function (arg) {
+            clearInteractionLocks();
+            finish({ ok: false, error: 'sign-in window was closed' +
+                     (arg && arg.error ? ' [' + arg.error + ']' : '') });
           });
         }
       );
@@ -205,6 +260,7 @@ var OooAuth = (function () {
 
   return {
     getToken: getToken,
+    clearInteractionLocks: clearInteractionLocks,
     getSignedInAccount: getSignedInAccount,
     signOut: signOut,
     isUsingNaa: function () { return usingNaa; }

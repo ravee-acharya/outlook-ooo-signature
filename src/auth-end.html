@@ -5,7 +5,7 @@
   <title>Signing in&#8230;</title>
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
-  <script src="config.js?v=20260916194732"></script>
+  <script src="config.js?v=20260924124143"></script>
   <style>
     body { font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; color: #616161; margin: 24px; }
     .err { color: #c4314b; white-space: pre-wrap; }
@@ -27,6 +27,22 @@
       function report(text, isError) {
         msg.textContent = text;
         if (isError) { msg.className = 'err'; }
+      }
+
+      // MSAL leaves an interaction.status lock behind if a flow is abandoned,
+      // and every later sign-in then fails with interaction_in_progress. There
+      // is no API to clear it, so remove it directly.
+      function clearLocks() {
+        [localStorage, sessionStorage].forEach(function (store) {
+          try {
+            var doomed = [];
+            for (var i = 0; i < store.length; i++) {
+              var k = store.key(i);
+              if (k && k.indexOf('interaction.status') !== -1) { doomed.push(k); }
+            }
+            doomed.forEach(function (k) { try { store.removeItem(k); } catch (e) { } });
+          } catch (e) { }
+        });
       }
 
       function sendToParent(payload) {
@@ -69,6 +85,9 @@
             }).catch(function () { return result; });
           })
           .then(function (tok) {
+            // The interactive flow is over either way; release the lock so the
+            // next sign-in is not blocked by it.
+            clearLocks();
             if (!tok) { return; }
             var payload = {
               ok: true,
@@ -82,6 +101,7 @@
             }
           })
           .catch(function (e) {
+            clearLocks();
             var text = (e && e.message) ? e.message : String(e);
             if (!sendToParent({ ok: false, error: text })) {
               report('Sign-in failed: ' + text, true);
