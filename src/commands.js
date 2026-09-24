@@ -647,31 +647,44 @@ function withTimeout(promise, ms, fallback) {
   });
 }
 
-// Silent only - never interactive. The task pane and this runtime are the same
-// origin, so MSAL's cached account is visible here. If MSAL is absent (the
-// JavaScript-only runtime on classic Windows) or nothing is cached, we simply
-// skip the refresh.
+// Why the last refresh attempt did or did not happen, for the diagnostic line.
+var refreshWhy = 'not-attempted';
+
+// Silent only - never interactive. This runtime shares browser storage with the
+// task pane (both are frames inside Outlook), and the pane imports the sign-in
+// dialog's MSAL cache into it, so the cached account is visible here. If MSAL is
+// absent (the JavaScript-only runtime on classic Windows) or nothing is cached,
+// we simply skip the refresh.
 function getSilentToken() {
   return new Promise(function (resolve) {
-    if (typeof msal === 'undefined' || typeof OooConfig === 'undefined') { resolve(null); return; }
+    if (typeof msal === 'undefined' || typeof OooConfig === 'undefined') {
+      refreshWhy = 'msal-unavailable'; resolve(null); return;
+    }
     try {
       var pca = new msal.PublicClientApplication({
         auth: {
           clientId: OooConfig.clientId,
           authority: 'https://login.microsoftonline.com/' + (OooConfig.tenantId || 'common'),
-          redirectUri: OooConfig.redirectUri
+          redirectUri: OooConfig.redirectUri,
+          navigateToLoginRequestUrl: false
         },
-        cache: { cacheLocation: 'localStorage' }
+        cache: { cacheLocation: 'localStorage' },
+        // A hidden-iframe renewal that is going to fail should not outlive the
+        // compose budget by much.
+        system: { iframeHashTimeout: 2000 }
       });
       var ready = pca.initialize ? pca.initialize() : Promise.resolve();
       ready.then(function () {
         var acct = pca.getActiveAccount() || (pca.getAllAccounts() || [])[0];
-        if (!acct) { return null; }
+        if (!acct) { refreshWhy = 'no-cached-account'; return null; }
         return pca.acquireTokenSilent({ scopes: OooConfig.scopes, account: acct });
       }).then(function (r) {
         resolve(r && r.accessToken ? r.accessToken : null);
-      }).catch(function () { resolve(null); });
-    } catch (e) { resolve(null); }
+      }).catch(function (e) {
+        refreshWhy = 'silent-failed:' + ((e && (e.errorCode || e.name)) || 'unknown');
+        resolve(null);
+      });
+    } catch (e) { refreshWhy = 'msal-error'; resolve(null); }
   });
 }
 
@@ -687,14 +700,19 @@ function refreshDays(options) {
     var windowEnd = OooCore.addMonths(today, months);
     var tz = (typeof OooConfig !== 'undefined' && OooConfig.defaults && OooConfig.defaults.timeZoneId)
       ? OooConfig.defaults.timeZoneId : 'India Standard Time';
+    refreshWhy = 'graph-pending';
     return OooGraph.getCalendarEvents(token, today, windowEnd, tz).then(function (events) {
+      refreshWhy = 'ok';
       return OooCore.daysFromEvents(events, {
         today: today,
         months: months,
         timeZoneLabel: options.timeZoneLabel || 'IST'
       });
     });
-  }).catch(function () { return null; });
+  }).catch(function () {
+    if (refreshWhy === 'graph-pending') { refreshWhy = 'graph-failed'; }
+    return null;
+  });
 }
 
 // Office.onReady must be called in an event-based runtime; without it
@@ -818,6 +836,7 @@ function onNewMessageComposeHandler(event) {
       }
 
       var s = readSettings();
+      refreshWhy = 'timed-out';
 
       // Optional, time-boxed. Null means "use what we already have".
       var work = Promise.all([
@@ -852,7 +871,7 @@ function onNewMessageComposeHandler(event) {
         if (!html) {
           note('nothing-to-insert',
                'days=' + dayCount + ' enabled=' + s.enabled + ' sigLen=' + s.signature.length +
-               ' refreshed=' + refreshed);
+               ' refreshed=' + refreshed + (refreshed ? '' : ' (' + refreshWhy + ')'));
           clearTimeout(guard); finish(); return;
         }
 
@@ -873,7 +892,7 @@ function onNewMessageComposeHandler(event) {
             } else {
               note('inserted',
                    'days=' + dayCount + ' htmlLen=' + html.length +
-                   ' refreshed=' + refreshed);
+                   ' refreshed=' + refreshed + (refreshed ? '' : ' (' + refreshWhy + ')'));
             }
             finish();
           }

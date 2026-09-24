@@ -5,7 +5,8 @@
   <title>Signing in&#8230;</title>
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
-  <script src="config.js?v=20260924125617"></script>
+  <script src="config.js?v=20260924145952"></script>
+  <script src="auth.js?v=20260924145952"></script>
   <style>
     body { font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; color: #616161; margin: 24px; }
     .err { color: #c4314b; white-space: pre-wrap; }
@@ -101,7 +102,11 @@
             var payload = {
               ok: true,
               accessToken: tok.accessToken,
-              username: (tok.account && (tok.account.username || tok.account.name)) || null
+              username: (tok.account && (tok.account.username || tok.account.name)) || null,
+              // This window's storage is not the task pane's (see
+              // exportMsalCache in auth.js), so send the MSAL cache back too.
+              // Without it the compose-time refresh can never get a token.
+              cache: (typeof OooAuth !== 'undefined') ? OooAuth.exportMsalCache() : null
             };
             if (sendToParent(payload)) {
               report('Signed in. Returning to Outlook…');

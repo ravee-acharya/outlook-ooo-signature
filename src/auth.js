@@ -1,10 +1,10 @@
 /*
  * Graph token acquisition for the task pane.
  *
- * Prefers Nested App Authentication (NAA), which lets an Office add-in get a
- * Graph token directly from the host with no middle-tier service and no popup.
- * Falls back to a normal MSAL popup where NAA is unavailable (older Outlook
- * builds), which is why the registration needs both redirect URIs.
+ * Inside Outlook, sign-in runs in an Office dialog (task panes block popups) and
+ * the dialog's MSAL cache is handed back and imported here, so both this pane
+ * and the compose-time refresh can then renew tokens silently. Outside Outlook a
+ * normal MSAL popup is used.
  *
  * Deliberately only used by the task pane. The OnNewMessageCompose handler runs
  * under a short timeout and must never block on the network or a sign-in prompt,
@@ -53,6 +53,74 @@ var OooAuth = (function () {
     return removed;
   }
 
+  // The sign-in dialog is a top-level window, so it gets different browser
+  // storage from the task pane and compose runtime, which run as frames inside
+  // Outlook (third-party storage partitioning). Tokens the dialog caches are
+  // therefore invisible to the compose-time refresh, which then silently falls
+  // back to stale dates. The dialog exports its MSAL entries with this, and the
+  // pane writes them into its own storage with importMsalCache().
+  //
+  // Only MSAL's own entries for this app are taken: other pages on the same
+  // github.io origin share this storage.
+  function exportMsalCache() {
+    var out = {};
+    try {
+      var cid = OooConfig.clientId;
+      var put = function (k) {
+        var v = localStorage.getItem(k);
+        if (k && v !== null && v !== undefined) { out[k] = v; }
+      };
+      var tokenIndex = 'msal.token.keys.' + cid;
+      put(tokenIndex);
+      put('msal.account.keys');
+      put('msal.' + cid + '.active-account');
+      put('msal.' + cid + '.active-account-filters');
+      try {
+        var t = JSON.parse(localStorage.getItem(tokenIndex) || '{}');
+        ['idToken', 'accessToken', 'refreshToken'].forEach(function (n) {
+          (t[n] || []).forEach(put);
+        });
+      } catch (e) { /* no tokens */ }
+      try {
+        (JSON.parse(localStorage.getItem('msal.account.keys') || '[]') || []).forEach(put);
+      } catch (e) { /* no accounts */ }
+    } catch (e) { /* storage blocked */ }
+    return out;
+  }
+
+  // Removes every MSAL entry for this app from this window's storage.
+  function purgeMsalStorage() {
+    try {
+      var doomed = [];
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (!k) { continue; }
+        if (k.indexOf('msal') === 0 || k.indexOf('msal.') !== -1 ||
+            (OooConfig && OooConfig.clientId && k.indexOf(OooConfig.clientId) !== -1)) {
+          doomed.push(k);
+        }
+      }
+      doomed.forEach(function (k) { try { localStorage.removeItem(k); } catch (e) { } });
+    } catch (e) { /* private mode or storage blocked - nothing more we can do */ }
+  }
+
+  function importMsalCache(entries) {
+    if (!entries || typeof entries !== 'object') { return 0; }
+    var keys = Object.keys(entries);
+    if (!keys.length) { return 0; }
+    // Replace rather than merge, so an old account's tokens cannot linger
+    // alongside the new one.
+    purgeMsalStorage();
+    var written = 0;
+    keys.forEach(function (k) {
+      if (typeof entries[k] !== 'string') { return; }
+      try { localStorage.setItem(k, entries[k]); written++; } catch (e) { /* quota */ }
+    });
+    // Rebuild the MSAL instance so it reads the new entries.
+    app = null;
+    return written;
+  }
+
   // A second sign-in started while the first is still running is itself a cause
   // of interaction_in_progress - two clicks on Sign in is enough. Share the one
   // in-flight attempt instead of starting another.
@@ -78,15 +146,12 @@ var OooAuth = (function () {
     }
     var cfg = msalConfig();
 
-    if (typeof msal.createNestablePublicClientApplication === 'function') {
-      try {
-        app = await msal.createNestablePublicClientApplication(cfg);
-        usingNaa = true;
-        return app;
-      } catch (e) {
-        // host does not support NAA - fall through to the standard flow
-      }
-    }
+    // Deliberately the standard client, not createNestablePublicClientApplication.
+    // Sign-in goes through the Office dialog and its cache is imported into this
+    // window's storage; a nested-app client keeps a separate cache and would not
+    // see it, so the pane and the compose runtime would disagree about whether
+    // the user is signed in. (NAA was never reached in practice: with no cached
+    // account the silent attempt was skipped and the dialog used every time.)
     app = new msal.PublicClientApplication(cfg);
     if (typeof app.initialize === 'function') { await app.initialize(); }
     usingNaa = false;
@@ -135,6 +200,9 @@ var OooAuth = (function () {
     if (isInOutlook()) {
       var viaDialog = await getTokenViaDialog();
       if (viaDialog && viaDialog.accessToken) {
+        // Without this the compose-time refresh has no token and quietly
+        // keeps using the dates from the last manual refresh.
+        importMsalCache(viaDialog.cache);
         dialogToken = viaDialog.accessToken;
         dialogTokenAt = Date.now();
         dialogAccount = viaDialog.username || null;
@@ -242,18 +310,7 @@ var OooAuth = (function () {
     // nothing. Whatever MSAL left behind is removed explicitly here - otherwise
     // the next silent refresh quietly signs the user back in and Sign out looks
     // like it did nothing.
-    try {
-      var doomed = [];
-      for (var i = 0; i < localStorage.length; i++) {
-        var k = localStorage.key(i);
-        if (!k) { continue; }
-        if (k.indexOf('msal') === 0 || k.indexOf('msal.') !== -1 ||
-            (OooConfig && OooConfig.clientId && k.indexOf(OooConfig.clientId) !== -1)) {
-          doomed.push(k);
-        }
-      }
-      doomed.forEach(function (k) { try { localStorage.removeItem(k); } catch (e) { } });
-    } catch (e) { /* private mode or storage blocked - nothing more we can do */ }
+    purgeMsalStorage();
 
     app = null;
     usingNaa = false;
@@ -262,6 +319,8 @@ var OooAuth = (function () {
   return {
     getToken: getToken,
     clearInteractionLocks: clearInteractionLocks,
+    exportMsalCache: exportMsalCache,
+    importMsalCache: importMsalCache,
     getSignedInAccount: getSignedInAccount,
     signOut: signOut,
     isUsingNaa: function () { return usingNaa; }

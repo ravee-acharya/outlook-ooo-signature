@@ -276,12 +276,39 @@
         .then(function () { $('signin').disabled = false; });
     });
 
+    function setSaveStatus(msg, kind) {
+      var el = $('saveStatus');
+      if (!el) { return; }
+      el.textContent = msg || '';
+      el.className = 'status save-status' + (kind ? ' ' + kind : '');
+    }
+
     $('save').addEventListener('click', function () {
+      var btn = $('save');
+      btn.disabled = true;
+      setSaveStatus('Saving…', null);
       saveSettings(function (err) {
-        if (err) { setStatus(err.message, 'err'); return; }
+        btn.disabled = false;
+        if (err) {
+          setSaveStatus('Not saved: ' + err.message, 'err');
+          setStatus(err.message, 'err');
+          return;
+        }
         renderPreview();
+        var t = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        setSaveStatus('✓ Saved at ' + t + '. New messages will use these settings.', 'ok');
         setStatus('Saved.', 'ok');
       });
+    });
+
+    // Once anything is changed again the confirmation no longer applies.
+    ['input', 'change'].forEach(function (evt) {
+      document.addEventListener(evt, function (e) {
+        if (e.target && e.target.id !== 'save' && $('saveStatus') &&
+            $('saveStatus').className.indexOf('ok') !== -1) {
+          setSaveStatus('Unsaved changes.', null);
+        }
+      }, true);
     });
 
     $('signout').addEventListener('click', function () {

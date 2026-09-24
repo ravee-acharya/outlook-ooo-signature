@@ -61,7 +61,7 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
 .row { display: flex; gap: 8px; flex-wrap: wrap; }
-.actions { display: flex; gap: 8px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 button {
   font: inherit;
@@ -88,5 +88,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .status { margin: 8px 0 0; font-size: 12px; min-height: 16px; }
 .status.err { color: #c4314b; }
 .status.ok  { color: #0e700e; }
+.save-status { flex-basis: 100%; margin-top: 6px; }
+.save-status.ok { font-weight: 600; }
 
 .boot { padding: 24px 4px; color: var(--muted); }
